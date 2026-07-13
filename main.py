@@ -68,6 +68,7 @@ from greeting_detector import (
     detect_greeting,
     select_response,
 )
+from scripted_intents import detect_scripted_intent
 from nia_prompt import PROMPT_MAESTRO
 from catalog import (
     buscar_por_codigo,
@@ -5424,6 +5425,62 @@ async def procesar_turno(
                 proforma_recibida=proforma_recibida,
                 archivo_proforma=archivo_proforma,
             )
+
+    # PRIORIDAD: intenciones comerciales con respuesta fija (escenarios 01-17)
+    if mensaje.strip() and not (archivo_bytes and archivo_nombre):
+        scripted = detect_scripted_intent(mensaje, historial=historial)
+        if scripted.get("matched"):
+            # En etapa comercial solo dejan pasar intenciones de servicio/cierre.
+            intents_en_comercial = {
+                "mensaje_automatico_ignorar",
+                "asesor_humano",
+                "datos_corporativos",
+                "documentos_legales_bancarios",
+                "pago_comprobante",
+                "guia_envio",
+                "factura_electronica",
+                "flete_envio",
+                "ficha_manual_catalogo",
+                "agradecimiento",
+                "adjunto_multimedia",
+                "compra_proforma",
+                "orden_directa",
+            }
+            if (not en_etapa_comercial) or scripted.get("intent") in intents_en_comercial:
+                if scripted.get("silent"):
+                    logger.info(
+                        "Mensaje automático ignorado: session=%s",
+                        session_id,
+                    )
+                    return {
+                        "respuesta": "",
+                        "etapa": "ignorado",
+                        "opciones": None,
+                        "items_resultado": None,
+                        "cliente": cliente or None,
+                    }
+
+                logger.info(
+                    "Intención fija: intent=%s session=%s",
+                    scripted.get("intent"),
+                    session_id,
+                )
+                return await _guardar_y_responder_turno(
+                    session_id=session_id,
+                    phone_id=phone_id,
+                    historial=historial,
+                    mensaje_usuario=mensaje,
+                    respuesta=scripted["response"],
+                    etapa=scripted.get("etapa") or "scripted",
+                    cliente=cliente,
+                    productos_acumulados=productos_acumulados,
+                    necesidad_ctx=necesidad_ctx or {},
+                    archivo_activo=archivo_activo,
+                    cotizacion_recibida=cotizacion_recibida,
+                    archivo_cotizacion=archivo_cotizacion,
+                    proforma_recibida=proforma_recibida,
+                    archivo_proforma=archivo_proforma,
+                )
 
     # PRIORIDAD: flujo híbrida libros → catálogo
     if mensaje.strip() and not (archivo_bytes and archivo_nombre) and not en_etapa_comercial:
