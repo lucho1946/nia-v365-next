@@ -142,12 +142,15 @@ Campos del catálogo que llevan al producto:
 - Q3 (interfaz/material): {campos['campos_q3']}
 
 Genera 3 preguntas en este orden:
-1. Proceso completo: qué mide/controla, dónde va instalado, qué fluido/material
-   (Esta pregunta identifica la FAMILIA TÉCNICA y el principio de medición)
-2. Rango + condiciones del proceso (temperatura, presión, tamaño)
-3. Señal de salida + entorno de instalación (protocolo, área clasificada, material)
+1. Qué equipo necesita o qué necesidad/aplicación está buscando
+   (Pregunta abierta y clara; no asumas fluido, presión ni instalación todavía)
+2. Rango + condiciones del proceso (temperatura, presión, tamaño) si aplica
+3. Señal de salida + entorno de instalación (protocolo, área clasificada, material) si aplica
 
-El objetivo es llegar al SKU exacto en máximo 3 preguntas."""
+El objetivo es llegar al SKU exacto en máximo 3 preguntas.
+La primera pregunta debe parecerse a:
+"Para identificar el producto correcto, cuéntame qué equipo o qué necesidad estás buscando."
+"""
 
 # ─── Llamada a OpenAI ─────────────────────────────────────────────────────────
 async def _llamar_openai(prompt: str) -> str:
@@ -207,7 +210,7 @@ FALLBACKS = {
         "¿Qué señal de salida y tipo de conexión necesitas?",
     ],
     "escenario_3_necesidad": [
-        "¿Qué variable necesitas medir o controlar, y en qué tipo de proceso?",
+        "Para identificar el producto correcto, cuéntame qué equipo o qué necesidad estás buscando.",
         "¿Cuál es el rango de operación y las condiciones físicas del proceso?",
         "¿Qué señal de salida necesitas y el área es clasificada?",
     ],

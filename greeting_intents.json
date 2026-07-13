@@ -1,0 +1,279 @@
+{
+  "version": "1.1.0",
+  "source_file": "CHAT DE NIA PARA ANALISIS CON chat GPT.csv",
+  "physical_rows_scanned": 45064,
+  "message_blocks_extracted": 90986,
+  "greeting_messages_detected": 3685,
+  "unique_examples": 1734,
+  "routing_rule": "El saludo es secundario cuando existe texto adicional. No debe bloquear la intención comercial principal.",
+  "intents": [
+    {
+      "name": "saludo_general",
+      "description": "Saludo neutro sin necesidad explícita.",
+      "priority": 10,
+      "responses": [
+        "¡Hola! Soy NIA. ¿Qué producto estás buscando?",
+        "¡Hola! Puedo ayudarte a buscar por código, marca, referencia o necesidad.",
+        "¡Hola! Cuéntame qué equipo o instrumento necesitas.",
+        "¡Hola! ¿Buscas un producto específico o necesitas una recomendación?",
+        "¡Hola! Estoy lista para ayudarte con tu búsqueda industrial.",
+        "¡Hola! Puedes indicarme el código, la referencia, la marca o la aplicación.",
+        "¡Hola! ¿Qué necesitas encontrar hoy?",
+        "¡Hola! Empecemos. ¿Qué producto o solución estás buscando?"
+      ],
+      "response_mode": "respond_and_wait",
+      "continue_to_main_intent": false
+    },
+    {
+      "name": "saludo_horario",
+      "description": "Saludo asociado a una franja del día.",
+      "priority": 10,
+      "responses": [
+        "¡Buenos días! ¿Qué producto necesitas encontrar?",
+        "¡Buenos días! Puedo ayudarte por código, marca, referencia o necesidad.",
+        "¡Buenas tardes! ¿En qué búsqueda de producto puedo ayudarte?",
+        "¡Buenas tardes! Cuéntame qué equipo necesitas.",
+        "¡Buenas noches! ¿Qué producto o instrumento estás buscando?",
+        "¡Buen día! Estoy lista para ayudarte con tu solicitud.",
+        "¡Buen día! Indícame el producto, código o aplicación que necesitas.",
+        "¡Buenas! ¿Qué equipo industrial estás buscando?"
+      ],
+      "response_mode": "respond_and_wait",
+      "continue_to_main_intent": false
+    },
+    {
+      "name": "saludo_formal",
+      "description": "Saludo protocolario o corporativo.",
+      "priority": 10,
+      "responses": [
+        "Cordial saludo. ¿En qué producto o solución podemos ayudarte?",
+        "Cordial saludo. Por favor indícame el equipo, código o referencia que necesitas.",
+        "Recibe un cordial saludo. Estoy disponible para apoyar tu búsqueda.",
+        "Muy buen día. Cuéntame cuál es tu requerimiento de producto.",
+        "Cordial saludo. Puedo ayudarte a buscar por marca, referencia, código o necesidad.",
+        "Buen día. Por favor comparte las características del equipo requerido.",
+        "Saludos. ¿Qué producto deseas consultar?",
+        "Cordial saludo. Revisemos tu solicitud."
+      ],
+      "response_mode": "respond_and_wait",
+      "continue_to_main_intent": false
+    },
+    {
+      "name": "saludo_informal",
+      "description": "Saludo coloquial o con variaciones ortográficas.",
+      "priority": 10,
+      "responses": [
+        "¡Hola! ¿Qué producto estás buscando?",
+        "¡Qué más! Cuéntame qué equipo necesitas.",
+        "¡Buenas! ¿Buscamos por código, marca, referencia o necesidad?",
+        "¡Hey! Estoy lista para ayudarte a encontrar el producto.",
+        "¡Holi! ¿Qué necesitas buscar?",
+        "¡Qué tal! Cuéntame cuál es tu requerimiento.",
+        "¡Hola! Dime qué producto tienes en mente.",
+        "¡Buenas! Arranquemos con el producto o la aplicación que necesitas."
+      ],
+      "response_mode": "respond_and_wait",
+      "continue_to_main_intent": false
+    },
+    {
+      "name": "saludo_con_solicitud",
+      "description": "Comienza con saludo y contiene una necesidad. Registrar saludo como intención secundaria.",
+      "priority": 100,
+      "responses": [
+        "¡Hola! Claro, voy a ayudarte con esa búsqueda.",
+        "¡Hola! Revisemos el producto que necesitas.",
+        "Con gusto. Voy a procesar tu solicitud.",
+        "Claro. Empecemos con esa búsqueda.",
+        "Perfecto. Voy a revisar tu requerimiento.",
+        "Entendido. Buscaré la mejor coincidencia para tu solicitud.",
+        "Con mucho gusto. Continuemos con el producto solicitado.",
+        "Bien. Voy a validar la información que compartiste.",
+        "Gracias por escribirnos. Revisemos ese requerimiento.",
+        "De acuerdo. Voy a ayudarte a identificar el producto."
+      ],
+      "response_mode": "prefix_then_route",
+      "continue_to_main_intent": true
+    }
+  ],
+  "greeting_prefix_regex": "^(?:h+o+l+a+|o+l+a+|h+o+l+i+s*|h+e+y+|e+y+|h+i+|h+e+l+l+o+|buen(?:o|a|os|as)?\\s+d[i1]a+s?|bueno+s?\\s+dias?|buen(?:a|as)?\\s+tarde+s?|buen(?:a|as)?\\s+noche+s?|muy\\s+buen(?:o|a|os|as)?\\s+(?:dias?|tardes?|noches?)|buenas+|buenos+|cordial(?:es)?\\s+saludo+s?|saludo+s?|que\\s+mas|que\\s+tal|que\\s+hubo|q\\s+mas|wenas+|wuenas+|bna?s?\\s+tardes?)\\b",
+  "response_policy": {
+    "pure_greeting": "Responder saludo y mostrar opciones de búsqueda.",
+    "greeting_with_request": "Saludar brevemente y ejecutar la intención principal sin preguntar de nuevo qué necesita.",
+    "selection": "Seleccionar una variante por intención. Puede usarse seed_text para una respuesta estable o selección aleatoria para producción.",
+    "no_repeat_rule": "La capa de sesión puede recordar la última respuesta y excluirla en el siguiente turno."
+  },
+  "dataset_summary": [
+    {
+      "intent": "saludo_con_solicitud",
+      "messages": 2848,
+      "unique_examples": 1566,
+      "top_variants": [
+        [
+          "hola",
+          1510
+        ],
+        [
+          "cordial saludo",
+          640
+        ],
+        [
+          "buen dia",
+          266
+        ],
+        [
+          "buenos dias",
+          243
+        ],
+        [
+          "buenas tardes",
+          142
+        ],
+        [
+          "buena tarde",
+          12
+        ],
+        [
+          "buenas",
+          8
+        ],
+        [
+          "muy buenos dias",
+          7
+        ],
+        [
+          "buenas noches",
+          4
+        ],
+        [
+          "buenas tarde",
+          3
+        ],
+        [
+          "buena noche",
+          2
+        ],
+        [
+          "buenos",
+          2
+        ],
+        [
+          "bueno dias",
+          2
+        ],
+        [
+          "muy buenas tardes",
+          2
+        ],
+        [
+          "hhola",
+          1
+        ],
+        [
+          "buena tardes",
+          1
+        ],
+        [
+          "buen dias",
+          1
+        ],
+        [
+          "hi",
+          1
+        ],
+        [
+          "saludos",
+          1
+        ]
+      ]
+    },
+    {
+      "intent": "saludo_formal",
+      "messages": 5,
+      "unique_examples": 3,
+      "top_variants": [
+        [
+          "saludos",
+          3
+        ],
+        [
+          "cordial saludo",
+          2
+        ]
+      ]
+    },
+    {
+      "intent": "saludo_general",
+      "messages": 331,
+      "unique_examples": 77,
+      "top_variants": [
+        [
+          "hola",
+          325
+        ],
+        [
+          "holaaa",
+          5
+        ],
+        [
+          "holaaaaaa",
+          1
+        ]
+      ]
+    },
+    {
+      "intent": "saludo_horario",
+      "messages": 501,
+      "unique_examples": 88,
+      "top_variants": [
+        [
+          "buenos dias",
+          185
+        ],
+        [
+          "buenas tardes",
+          146
+        ],
+        [
+          "buen dia",
+          120
+        ],
+        [
+          "buenos",
+          16
+        ],
+        [
+          "buena tarde",
+          14
+        ],
+        [
+          "buenas",
+          10
+        ],
+        [
+          "buenas noches",
+          3
+        ],
+        [
+          "muy buenas tardes",
+          2
+        ],
+        [
+          "bueno dia",
+          2
+        ],
+        [
+          "muy buen dia",
+          1
+        ],
+        [
+          "muy buenos dias",
+          1
+        ],
+        [
+          "buenas dias",
+          1
+        ]
+      ]
+    }
+  ]
+}

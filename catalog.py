@@ -344,6 +344,120 @@ async def buscar_por_codigo(codigo: str) -> Optional[dict]:
     return normalizado
 
 
+def _marca_coincide(marca_producto: str, marca_cliente: str) -> bool:
+    """Compara marca del catálogo con la indicada por el cliente."""
+    mp = _clean_text(marca_producto).lower()
+    mc = _clean_text(marca_cliente).lower()
+    if not mp or not mc:
+        return False
+    return mp == mc or mc in mp or mp in mc
+
+
+def _variantes_referencia(valor: str) -> list[str]:
+    """Genera variantes comunes de una referencia (mayúsculas, guiones, compacta)."""
+    valor = _clean_text(valor)
+    if not valor:
+        return []
+
+    variantes = {valor, valor.upper()}
+    compacta = re.sub(r"[\s\-_./]+", "", valor, flags=re.IGNORECASE).upper()
+    if compacta:
+        variantes.add(compacta)
+    guiones = re.sub(r"\s+", "-", valor.strip()).upper()
+    if guiones:
+        variantes.add(guiones)
+    espacios = re.sub(r"[\-_./]+", " ", valor.strip()).upper()
+    espacios = re.sub(r"\s+", " ", espacios).strip()
+    if espacios:
+        variantes.add(espacios)
+
+    return list(variantes)
+
+
+async def _buscar_campo_exacto(collection, campo: str, valor: str) -> list:
+    """Busca coincidencia exacta en REFERENCIA o REF_ALTERNATIVA."""
+    variantes = _variantes_referencia(valor)
+    if not variantes:
+        return []
+
+    query = {campo: {"$in": variantes}}
+    cursor = collection.find(query, {"_id": 0}).limit(50)
+    docs = await cursor.to_list(50)
+    return [normalizar_producto(doc) for doc in docs]
+
+
+async def buscar_por_referencia(valor: str, marca: Optional[str] = None) -> dict:
+    """
+    Búsqueda por referencia con prioridad comercial:
+
+    1. REFERENCIA (exacta)
+    2. REF_ALTERNATIVA (exacta)
+
+    Reglas:
+    - 1 match en REFERENCIA → entrega directa (confianza alta).
+    - Varios matches o solo REF_ALTERNATIVA → pide MARCA_LET.
+    - Con marca del cliente → filtra y entrega si queda 1.
+    """
+    valor = _clean_text(valor)
+    if not valor:
+        return {"estado": "sin_resultado", "candidatos": [], "match_campo": None}
+
+    db = get_db()
+    collection = db[PRODUCTS_COLLECTION]
+
+    refs = await _buscar_campo_exacto(collection, "REFERENCIA", valor)
+    if marca:
+        refs = [p for p in refs if _marca_coincide(p.get("marca", ""), marca)]
+
+    if len(refs) == 1:
+        prod = refs[0]
+        prod["_match_type"] = "exacto_referencia"
+        prod["_score"] = 1.0
+        return {
+            "estado": "encontrado",
+            "producto": prod,
+            "candidatos": refs,
+            "match_campo": "REFERENCIA",
+            "confianza": "alta",
+        }
+
+    if len(refs) > 1:
+        return {
+            "estado": "necesita_marca",
+            "producto": None,
+            "candidatos": refs,
+            "match_campo": "REFERENCIA",
+            "confianza": "baja",
+        }
+
+    alts = await _buscar_campo_exacto(collection, "REF_ALTERNATIVA", valor)
+    if marca:
+        alts = [p for p in alts if _marca_coincide(p.get("marca", ""), marca)]
+
+    if len(alts) == 1 and marca:
+        prod = alts[0]
+        prod["_match_type"] = "exacto_ref_alternativa"
+        prod["_score"] = 0.95
+        return {
+            "estado": "encontrado",
+            "producto": prod,
+            "candidatos": alts,
+            "match_campo": "REF_ALTERNATIVA",
+            "confianza": "media",
+        }
+
+    if len(alts) >= 1:
+        return {
+            "estado": "necesita_marca",
+            "producto": None,
+            "candidatos": alts,
+            "match_campo": "REF_ALTERNATIVA",
+            "confianza": "baja",
+        }
+
+    return {"estado": "sin_resultado", "candidatos": [], "match_campo": None}
+
+
 # ============================================================
 # BÚSQUEDA POR TEXTO
 # ============================================================
