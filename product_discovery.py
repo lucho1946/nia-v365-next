@@ -302,7 +302,7 @@ def hay_familia_ambigua_por_dl(
         return False, [], []
 
     preguntas = generar_preguntas_desde_campos(campos)
-    # Quitar preguntas genéricas de fallback si no aportan opciones útiles.
+    # Quitar preguntas genéricas o con una sola opción real (no discriminan).
     perguntas_utiles = []
     for preg in preguntas:
         opts = [
@@ -310,12 +310,78 @@ def hay_familia_ambigua_por_dl(
             for o in (preg.get("opciones") or [])
             if str(o.get("valor") or "").lower() not in {"otro", ""}
         ]
-        if opts:
+        opts_dedup = _deduplicar_opciones_valores(
+            [str(o.get("valor") or o.get("label") or "") for o in opts]
+        )
+        if len(opts_dedup) >= 2:
             perguntas_utiles.append(preg)
     if not perguntas_utiles:
         return False, [], []
 
     return True, grupo, perguntas_utiles[:2]
+
+
+def _opciones_utiles_pregunta(pregunta: dict) -> list[dict]:
+    return [
+        o
+        for o in ((pregunta or {}).get("opciones") or [])
+        if str(o.get("valor") or "").lower() not in {"otro", ""}
+    ]
+
+
+def filtrar_preguntas_familia_no_respondidas(
+    preguntas: list[dict],
+    respuestas: list[str],
+) -> list[dict]:
+    """
+    Descarta preguntas cuyo único valor útil ya fue respondido
+    (evita bucles: rango -50 a 300 → otra vez el mismo rango).
+    """
+    claves_resp = {
+        _clave_dedup_opcion(r)
+        for r in (respuestas or [])
+        if str(r or "").strip() and _clave_dedup_opcion(r)
+    }
+    claves_resp |= {
+        _normalizar_texto(r)
+        for r in (respuestas or [])
+        if str(r or "").strip()
+    }
+
+    limpias = []
+    for preg in preguntas or []:
+        if not isinstance(preg, dict):
+            continue
+        opts = _opciones_utiles_pregunta(preg)
+        if len(opts) < 2:
+            continue
+        claves_opts = {
+            _clave_dedup_opcion(str(o.get("valor") or o.get("label") or ""))
+            for o in opts
+        }
+        claves_opts.discard("")
+        # Si todas las opciones útiles ya están respondidas, no aporta.
+        if claves_opts and claves_opts.issubset(claves_resp):
+            continue
+        # Si tras quitar lo ya respondido queda < 2 opciones, tampoco.
+        opts_nuevas = [
+            o
+            for o in opts
+            if _clave_dedup_opcion(str(o.get("valor") or o.get("label") or ""))
+            not in claves_resp
+            and _normalizar_texto(str(o.get("valor") or "")) not in claves_resp
+        ]
+        if len(opts_nuevas) < 2 and len(opts) >= 2:
+            # Puede haber opciones nuevas: conservar si hay ≥2 opciones originales
+            # y no son exactamente la respuesta previa (caso 3 opciones con 1 ya dada).
+            if len(opts_nuevas) == 0:
+                continue
+        if len(_deduplicar_opciones_valores(
+            [str(o.get("valor") or "") for o in opts]
+        )) < 2:
+            continue
+        limpias.append(preg)
+    return limpias
 
 
 def filtrar_candidatos_por_respuestas_dl(
@@ -344,33 +410,47 @@ def filtrar_candidatos_por_respuestas_dl(
     filtrados = list(candidatos)
     for campo, valor_cliente in attrs_cliente.items():
         valor_norm = _normalizar_texto(valor_cliente)
-        if not valor_norm:
+        clave_cliente = _clave_dedup_opcion(valor_cliente)
+        if not valor_norm and not clave_cliente:
             continue
         siguiente = []
         for prod in filtrados:
             dl = str(prod.get("descripcion_larga") or "")
             attrs_prod = extraer_atributos_descripcion_larga(dl)
-            valor_prod = attrs_prod.get(campo) or attrs_prod.get(_campo_canonico(campo))
-            if valor_prod and _normalizar_texto(valor_prod) == valor_norm:
-                siguiente.append(prod)
-                continue
-            if valor_norm in _normalizar_texto(dl):
+            valor_prod = (
+                attrs_prod.get(campo)
+                or attrs_prod.get(_campo_canonico(campo))
+                or attrs_prod.get("rango")
+                or attrs_prod.get("rango_temperatura")
+            )
+            if valor_prod:
+                if valor_norm and _normalizar_texto(valor_prod) == valor_norm:
+                    siguiente.append(prod)
+                    continue
+                if clave_cliente and _clave_dedup_opcion(valor_prod) == clave_cliente:
+                    siguiente.append(prod)
+                    continue
+            if valor_norm and valor_norm in _normalizar_texto(dl):
                 siguiente.append(prod)
         if siguiente:
             filtrados = siguiente
 
-    # Respuestas que no mapearon a campo (texto libre): deben aparecer en DL.
+    # Respuestas etiquetadas (chips): match por clave dedup contra attrs de DL.
     for resp in respuestas_utiles:
-        if extraer_atributos_descripcion_larga(resp):
+        clave = _clave_dedup_opcion(resp)
+        if not clave:
             continue
-        resp_norm = _normalizar_texto(resp)
-        if not resp_norm or resp_norm in {"otro", "no se", "no sé"}:
-            continue
-        siguiente = [
-            p
-            for p in filtrados
-            if resp_norm in _normalizar_texto(str(p.get("descripcion_larga") or ""))
-        ]
+        siguiente = []
+        for prod in filtrados:
+            dl = str(prod.get("descripcion_larga") or "")
+            attrs_prod = extraer_atributos_descripcion_larga(dl)
+            valores_attr = [str(v) for v in attrs_prod.values() if v]
+            if any(_clave_dedup_opcion(v) == clave for v in valores_attr):
+                siguiente.append(prod)
+                continue
+            resp_norm = _normalizar_texto(resp)
+            if resp_norm and resp_norm in _normalizar_texto(dl):
+                siguiente.append(prod)
         if siguiente:
             filtrados = siguiente
 
@@ -795,15 +875,22 @@ def analizar_campos_discriminantes(
         if not valores_utiles:
             continue
 
-        conteo = Counter(valores_utiles)
-        distinct = len(conteo)
+        # Deduplicar semánticamente (ej. "-50 a 300°C" vs "-50 a 300 ° C / °F")
+        # para no tratar el mismo rango como varios discriminantes.
+        valores_dedup = _deduplicar_opciones_valores(valores_utiles)
+        if len(valores_dedup) <= 1:
+            continue
+
+        claves = [_clave_dedup_opcion(v) for v in valores_utiles if _clave_dedup_opcion(v)]
+        conteo_claves = Counter(claves)
+        distinct = len(conteo_claves)
         cobertura = len(valores_utiles) / total
 
         if distinct <= 1:
             continue
 
         peso = distinct * cobertura
-        valores_frecuentes = [v for v, _ in conteo.most_common(5)]
+        valores_frecuentes = valores_dedup[:5]
 
         candidatos.append(
             {
