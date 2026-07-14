@@ -80,6 +80,7 @@ from catalog import (
     evaluar_coincidencia,
     extraer_campos_tecnicos,
     formatear_producto,
+    normalizar_referencia,
 )
 from product_matcher import validar_compatibilidad_producto
 from file_processor import procesar_archivo
@@ -621,6 +622,23 @@ def _ctx_confirmacion_producto() -> dict:
     return {"opciones_actuales": _opciones_confirmacion_si_no()}
 
 
+PREGUNTA_COTIZACION_TECNICA = (
+    "¿La cotización cumple con lo que necesitas técnicamente?"
+)
+
+
+def _ctx_confirmacion_cotizacion_tecnica() -> dict:
+    return {"opciones_actuales": _opciones_confirmacion_si_no()}
+
+
+def _respuesta_confirmar_cotizacion_tecnica(
+    prefijo: str = "Perfecto, tomo esto como cotización recibida. ",
+) -> tuple[str, str, dict]:
+    """Pregunta de validación técnica + botones Sí/No."""
+    texto = f"{prefijo}{PREGUNTA_COTIZACION_TECNICA}".strip()
+    return texto, "cotizacion_enviada", _ctx_confirmacion_cotizacion_tecnica()
+
+
 def _minutos_desde_ultimo_turno(historial: list) -> float:
     if not historial:
         return 0.0
@@ -796,15 +814,41 @@ def detectar_identificador(texto: str):
     if not texto:
         return None, None
 
+    # Un correo nunca es código/referencia. "afvr1975@gmail.com" no debe
+    # matchear como referencia segmentada "GMAIL.COM".
+    if EMAIL_RE.fullmatch(texto):
+        return None, None
+
+    # Buscamos identificadores ignorando correos embebidos en el mensaje.
+    texto_sin_email = EMAIL_RE.sub(" ", texto).strip()
+    if not texto_sin_email:
+        return None, None
+
+    def _ref_limpia(valor: str) -> str:
+        """Trim + mayúsculas; conserva separadores (variantes mecánicas en catálogo)."""
+        return str(valor or "").strip().upper()
+
+    def _parece_dominio_o_email(valor: str) -> bool:
+        v = (valor or "").strip().lower()
+        if not v or "@" in v:
+            return True
+        if re.search(
+            r"\.(com|net|org|co|es|io|gov|edu|info|mx|ar|cl|pe|ec)(?:\b|$)",
+            v,
+        ):
+            return True
+        return False
+
     # ------------------------------------------------------------
     # 0. Referencia declarada explícitamente (valor completo)
     # ------------------------------------------------------------
-    match_decl = REFERENCIA_DECLARADA_RE.search(texto)
+    match_decl = REFERENCIA_DECLARADA_RE.search(texto_sin_email)
     if match_decl:
         referencia = match_decl.group(1).strip().strip(".,;:")
         # Evita capturar frases vacías o pedidos sin valor real.
         if (
             len(referencia) >= 3
+            and not _parece_dominio_o_email(referencia)
             and not re.fullmatch(
                 r"(?:del?\s+)?(?:producto|catalogo|exact[oa]|adicional|por\s+favor)?",
                 referencia,
@@ -812,7 +856,13 @@ def detectar_identificador(texto: str):
             )
             and re.search(r"[A-Z0-9]", referencia, re.IGNORECASE)
         ):
+            referencia = _ref_limpia(referencia)
             logger.debug("Referencia declarada detectada: %s", referencia)
+            # Guarda forma canónica compacta en log para diagnóstico.
+            logger.debug(
+                "Referencia normalizada: %s",
+                normalizar_referencia(referencia),
+            )
             return "referencia", referencia
 
     # ------------------------------------------------------------
@@ -820,7 +870,7 @@ def detectar_identificador(texto: str):
     # ------------------------------------------------------------
     # Se evalúa antes del código numérico porque P350279 contiene
     # seis dígitos, pero comercialmente es una referencia completa.
-    match_p = REFERENCIA_P_RE.search(texto)
+    match_p = REFERENCIA_P_RE.search(texto_sin_email)
 
     if match_p:
         numero = match_p.group(1)
@@ -836,7 +886,7 @@ def detectar_identificador(texto: str):
     # ------------------------------------------------------------
     # 2. Código exacto de seis dígitos
     # ------------------------------------------------------------
-    match_codigo = CODIGO_RE.search(texto)
+    match_codigo = CODIGO_RE.search(texto_sin_email)
 
     if match_codigo:
         codigo = match_codigo.group(1)
@@ -851,27 +901,29 @@ def detectar_identificador(texto: str):
     # ------------------------------------------------------------
     # 2b. Referencia segmentada o con espacios internos
     # ------------------------------------------------------------
-    match_seg = REFERENCIA_SEGMENTADA_RE.search(texto)
+    match_seg = REFERENCIA_SEGMENTADA_RE.search(texto_sin_email)
     if match_seg:
-        referencia = match_seg.group(1).strip()
-        logger.debug("Referencia segmentada detectada: %s", referencia)
-        return "referencia", referencia
+        referencia = _ref_limpia(match_seg.group(1))
+        if not _parece_dominio_o_email(referencia):
+            logger.debug("Referencia segmentada detectada: %s", referencia)
+            return "referencia", referencia
 
-    if REFERENCIA_ESPACIOS_RE.match(texto.strip()):
-        referencia = texto.strip()
-        logger.debug("Referencia con espacios detectada: %s", referencia)
-        return "referencia", referencia
+    if REFERENCIA_ESPACIOS_RE.match(texto_sin_email.strip()):
+        referencia = _ref_limpia(texto_sin_email)
+        if not _parece_dominio_o_email(referencia):
+            logger.debug("Referencia con espacios detectada: %s", referencia)
+            return "referencia", referencia
 
     # ------------------------------------------------------------
     # 3. Referencia alfanumérica general
     # ------------------------------------------------------------
     # Primero buscamos referencias declaradas explícitamente:
-    match_ref = REFERENCIA_ALFANUMERICA_EXPLICITA_RE.search(texto)
+    match_ref = REFERENCIA_ALFANUMERICA_EXPLICITA_RE.search(texto_sin_email)
 
     # Si no existe una palabra declarativa, solo aceptamos formatos compactos
     # porque normalmente pertenece a una frase natural.
     if not match_ref:
-        match_ref = REFERENCIA_ALFANUMERICA_COMPACTA_RE.search(texto)
+        match_ref = REFERENCIA_ALFANUMERICA_COMPACTA_RE.search(texto_sin_email)
 
     if match_ref:
         prefijo = match_ref.group(1).upper()
@@ -889,13 +941,12 @@ def detectar_identificador(texto: str):
 
         if prefijo not in prefijos_bloqueados:
             referencia = f"{prefijo}{cuerpo}"
-
-            logger.debug(
-                "Referencia alfanumérica detectada: %s",
-                referencia,
-            )
-
-            return "referencia", referencia
+            if not _parece_dominio_o_email(referencia):
+                logger.debug(
+                    "Referencia alfanumérica detectada: %s",
+                    referencia,
+                )
+                return "referencia", referencia
 
     return None, None
 
@@ -1074,34 +1125,52 @@ def _extraer_marca_junto_a_referencia(
     return resto
 
 
+def _marcas_desde_candidatos(candidatos: list) -> list[str]:
+    return sorted(
+        {
+            str(c.get("marca") or "").strip()
+            for c in (candidatos or [])
+            if str(c.get("marca") or "").strip()
+        },
+        key=lambda m: m.lower(),
+    )
+
+
+def _opciones_marcas_referencia(candidatos: list) -> list[dict]:
+    """Botones de marca detectadas + siempre 'Otro'."""
+    opciones = []
+    for idx, marca in enumerate(_marcas_desde_candidatos(candidatos)[:8], start=1):
+        opciones.append(
+            {
+                "id": str(idx),
+                "label": marca,
+                "valor": marca,
+            }
+        )
+    opciones.append(
+        {
+            "id": str(len(opciones) + 1),
+            "label": "Otro",
+            "valor": "otro",
+        }
+    )
+    return opciones
+
+
 def _respuesta_pedir_marca_referencia(
     referencia: str,
     candidatos: list,
     match_campo: str,
 ) -> str:
-    marcas = sorted(
-        {
-            str(c.get("marca") or "").strip()
-            for c in (candidatos or [])
-            if str(c.get("marca") or "").strip()
-        }
-    )
-    if len(marcas) == 1:
-        hint = f" (por ejemplo: {marcas[0]})"
-    elif len(marcas) > 1:
-        hint = f" (opciones: {', '.join(marcas[:5])})"
-    else:
-        hint = ""
-
     if match_campo == "REF_ALTERNATIVA":
         return (
             f"Encontré una coincidencia alternativa para la referencia {referencia}. "
-            f"Para confirmar, ¿cuál es la marca (MARCA_LET){hint}?"
+            "Para confirmar, ¿cuál es la marca?"
         )
 
     return (
         f"Encontré coincidencias para la referencia {referencia}. "
-        f"¿Cuál es la marca (MARCA_LET){hint}?"
+        "¿Cuál es la marca?"
     )
 
 
@@ -1978,6 +2047,19 @@ async def rama_codigo(
                 "candidatos": res_ref.get("candidatos") or [],
                 "match_campo": res_ref.get("match_campo"),
                 "candidatos_encontrados": True,
+            }
+
+        # Muchos identificadores P###### viven en CODIGO, no en REFERENCIA.
+        # Fallback exacto (mismas variantes mecánicas) sin pasar a fuzzy.
+        prod_codigo = await buscar_por_codigo(valor)
+        if prod_codigo:
+            return {
+                "estado": "encontrado",
+                "producto": prod_codigo,
+                "tipo": "codigo",
+                "exacto": True,
+                "candidatos_encontrados": True,
+                "match_campo": "CODIGO",
             }
 
         logger.info("Referencia sin match exacto: %s marca=%s", valor, marca)
@@ -3752,6 +3834,7 @@ def construir_respuesta_desde_resultado(
         referencia = res.get("referencia_buscada") or ""
         candidatos = list(res.get("candidatos") or [])
         match_campo = res.get("match_campo") or "REFERENCIA"
+        opciones = _opciones_marcas_referencia(candidatos)
 
         return (
             _marcar_respuesta_segura(
@@ -3763,7 +3846,7 @@ def construir_respuesta_desde_resultado(
                 "referencia_pendiente": referencia,
                 "candidatos_referencia": candidatos,
                 "match_campo_referencia": match_campo,
-                "opciones_actuales": [],
+                "opciones_actuales": opciones,
             },
         )
 
@@ -4312,10 +4395,34 @@ def _capturar_dato_comercial_por_etapa(mensaje: str, cliente: dict, etapa: str) 
                 cliente["empresa"] = empresa
                 logger.debug("Empresa simple capturada por etapa: %s", empresa)
 
+        if not cliente.get("nit"):
+            nit_match = NIT_RE.search(mensaje)
+            if nit_match:
+                cliente["nit"] = nit_match.group(1).strip()
+                logger.debug("NIT capturado por etapa proforma: %s", cliente["nit"])
+
         rut = _extraer_rut_desde_mensaje(mensaje)
-        if rut and cliente.get("rut") in {None, "", "pendiente"}:
+        if rut and cliente.get("rut") in {None, "", "pendiente", "pendiente_solicitado"}:
             cliente["rut"] = rut
             logger.debug("RUT capturado/actualizado por parser de RUT: %s", rut)
+        elif not cliente.get("rut") or cliente.get("rut") in {
+            "pendiente",
+            "pendiente_solicitado",
+        }:
+            # Si solo adjunta/menciona documento fiscal sin la palabra RUT.
+            texto_norm = _normalizar_intencion(mensaje)
+            if any(
+                f in texto_norm
+                for f in {
+                    "documento fiscal",
+                    "rut adjunto",
+                    "adjunto el rut",
+                    "te envio el rut",
+                    "envio el rut",
+                    "archivo rut",
+                }
+            ):
+                cliente["rut"] = "recibido"
 
     # Última barrera: elimina acciones de interfaz que hayan entrado por cualquier parser.
     return _sanitizar_cliente_control(cliente)
@@ -4379,17 +4486,17 @@ def _respuesta_siguiente_dato_comercial(
             )
 
         if not cliente.get("nit"):
-            return "Gracias. ¿Cuál es el NIT de la empresa?", "proforma"
+            return (
+                "Gracias. ¿Cuál es el NIT o documento fiscal de la empresa? "
+                "También envíame el RUT, por favor.",
+                "proforma",
+            )
 
         # ------------------------------------------------------------
         # RUT NO BLOQUEANTE
         # ------------------------------------------------------------
-        # Regla de negocio:
-        # - NIT identifica tributariamente al cliente.
-        # - RUT es soporte/documento tributario.
-        # - Para no frenar el flujo comercial, si ya tenemos empresa
-        #   y NIT, dejamos la proforma lista para revisión del asesor.
-        # - Si el cliente ya compartió RUT, se conserva en cliente["rut"].
+        # Ya se pidió junto con el NIT. Si no llegó, queda pendiente
+        # sin frenar el avance a proforma_lista.
         if not cliente.get("rut"):
             cliente["rut"] = "pendiente"
 
@@ -4666,13 +4773,13 @@ def _manejar_estado_comercial_prioritario(
             "handled": True,
             "respuesta": (
                 "Perfecto, tomo esto como cotización recibida. "
-                "¿La cotización cumple con lo que necesitas técnicamente?"
+                f"{PREGUNTA_COTIZACION_TECNICA}"
             ),
             "etapa": "cotizacion_enviada",
             "cliente": cliente,
             "necesidad_ctx": {
                 **necesidad_ctx,
-                **_ctx_confirmacion_producto(),
+                **_ctx_confirmacion_cotizacion_tecnica(),
             },
             "productos_acumulados": productos_acumulados,
         }
@@ -4683,6 +4790,8 @@ def _manejar_estado_comercial_prioritario(
     if etapa == "cotizacion_enviada":
         if _es_confirmacion_afirmativa(mensaje):
             necesidad_ctx["cotizacion_aprobada_cliente"] = True
+            # Limpia botones Sí/No; proforma pide datos, no confirmación.
+            necesidad_ctx["opciones_actuales"] = []
 
             respuesta_dato, etapa_dato = _respuesta_siguiente_dato_comercial(
                 cliente,
@@ -4694,7 +4803,10 @@ def _manejar_estado_comercial_prioritario(
                 "respuesta": respuesta_dato,
                 "etapa": etapa_dato,
                 "cliente": cliente,
-                "necesidad_ctx": necesidad_ctx,
+                "necesidad_ctx": {
+                    **necesidad_ctx,
+                    "opciones_actuales": [],
+                },
                 "productos_acumulados": productos_acumulados,
                 "aprendizaje": _preparar_feedback_aprendizaje(
                     tipo="si",
@@ -4719,7 +4831,10 @@ def _manejar_estado_comercial_prioritario(
                 ),
                 "etapa": "descubrimiento",
                 "cliente": cliente,
-                "necesidad_ctx": necesidad_ctx,
+                "necesidad_ctx": {
+                    **necesidad_ctx,
+                    "opciones_actuales": [],
+                },
                 "productos_acumulados": productos_acumulados,
                 "aprendizaje": _preparar_feedback_aprendizaje(
                     tipo="no",
@@ -4737,13 +4852,13 @@ def _manejar_estado_comercial_prioritario(
             "handled": True,
             "respuesta": (
                 "Para avanzar correctamente, necesito confirmar: "
-                "¿la cotización cumple con lo que necesitas técnicamente?"
+                f"{PREGUNTA_COTIZACION_TECNICA}"
             ),
             "etapa": "cotizacion_enviada",
             "cliente": cliente,
             "necesidad_ctx": {
                 **necesidad_ctx,
-                **_ctx_confirmacion_producto(),
+                **_ctx_confirmacion_cotizacion_tecnica(),
             },
             "productos_acumulados": productos_acumulados,
         }
@@ -5061,21 +5176,22 @@ def _manejar_estado_comercial_prioritario(
     # 3) Confirmando cierre: agregar al carrito o pasar a cotización.
     if etapa == "confirmando_cierre":
         if _es_pedido_cotizar(mensaje):
-            cliente = _capturar_dato_comercial_por_etapa(
-                mensaje=mensaje,
-                cliente=cliente,
-                etapa=etapa,
-            )
-            respuesta_dato, etapa_dato = _respuesta_siguiente_dato_comercial(
-                cliente,
-                etapa_objetivo="cotizacion",
-            )
+            # Nueva solicitud de cotización: pedir nombre y correo siempre,
+            # sin reutilizar automáticamente datos de memoria permanente.
+            cliente_cotizacion = {
+                k: v
+                for k, v in dict(cliente or {}).items()
+                if k not in {"nombre", "email"}
+            }
             return {
                 "handled": True,
-                "respuesta": respuesta_dato,
-                "etapa": etapa_dato,
-                "cliente": cliente,
-                "necesidad_ctx": {},
+                "respuesta": "¿A nombre de quién va la cotización?",
+                "etapa": "cotizacion",
+                "cliente": cliente_cotizacion,
+                "necesidad_ctx": {
+                    "forzar_contacto_cotizacion": True,
+                    "opciones_actuales": [],
+                },
                 "productos_acumulados": productos_acumulados,
             }
 
@@ -5192,21 +5308,60 @@ def _manejar_estado_comercial_prioritario(
             etapa_objetivo=etapa_objetivo,
         )
 
+        ctx_out = {"opciones_actuales": []}
+        if etapa_objetivo == "cotizacion" and etapa_dato == "cotizacion":
+            # Sigue pidiendo nombre/correo en esta solicitud.
+            ctx_out["forzar_contacto_cotizacion"] = True
+        # Si ya cerró contacto (cotizacion_lista), no forzar más.
+
         return {
             "handled": True,
             "respuesta": respuesta_dato,
             "etapa": etapa_dato,
             "cliente": cliente,
-            "necesidad_ctx": {},
+            # Proforma pide texto/archivo (NIT, RUT), nunca Sí/No.
+            "necesidad_ctx": ctx_out,
             "productos_acumulados": productos_acumulados,
         }
 
-    # 5) Cierre seguro: no inventar cotización ni proforma automática.
+    # 5) Cotización lista: si el cliente indica que ya la recibió,
+    #    pasa a validación técnica con botones Sí/No.
     if etapa == "cotizacion_lista":
+        msg_norm = _normalizar_intencion(mensaje)
+        indicios_recibida = any(
+            frase in msg_norm
+            for frase in {
+                "ya tengo la cotizacion",
+                "me llego la cotizacion",
+                "ya recibi la cotizacion",
+                "ya la recibi",
+                "me la enviaron",
+                "ya me cotizaron",
+                "tengo la cotizacion",
+                "ya esta la cotizacion",
+                "ya esta lista la cotizacion",
+            }
+        ) or tipo_mensaje in {"cotizacion_recibida", "link_documento"}
+
+        if indicios_recibida:
+            necesidad_ctx["cotizacion_recibida"] = True
+            if tipo_mensaje == "link_documento":
+                necesidad_ctx["archivo_cotizacion"] = mensaje
+            respuesta, etapa_dato, ctx_opts = _respuesta_confirmar_cotizacion_tecnica()
+            return {
+                "handled": True,
+                "respuesta": respuesta,
+                "etapa": etapa_dato,
+                "cliente": cliente,
+                "necesidad_ctx": {**necesidad_ctx, **ctx_opts},
+                "productos_acumulados": productos_acumulados,
+            }
+
         return {
             "handled": True,
             "respuesta": (
-                "Tu cotización está en proceso. Cuando la recibas, me confirmas si cumple con lo que necesitas técnicamente."
+                "Tu cotización está en proceso. Cuando la recibas, me confirmas "
+                "si cumple con lo que necesitas técnicamente."
             ),
             "etapa": "cotizacion_lista",
             "cliente": cliente,
@@ -5282,13 +5437,24 @@ async def _guardar_y_responder_turno(
 
     await _persistir_cliente_permanente(phone_id, cliente)
 
+    # Garantiza cuadritos Sí/No en validación técnica de cotización.
+    necesidad_ctx = dict(necesidad_ctx or {})
+    resp_norm = (respuesta or "").lower()
+    if (
+        (not necesidad_ctx.get("opciones_actuales"))
+        and "cumple con lo que necesitas t" in resp_norm
+        and "cotizaci" in resp_norm
+    ):
+        necesidad_ctx.update(_ctx_confirmacion_cotizacion_tecnica())
+        etapa = "cotizacion_enviada"
+
     await save_session(
         session_id=session_id,
         phone_id=phone_id,
         turnos=historial + [turno_user, turno_nia],
         etapa=etapa,
         archivo_activo=archivo_activo,
-        necesidad_ctx=necesidad_ctx or {},
+        necesidad_ctx=necesidad_ctx,
         cliente=cliente or {},
         productos_acumulados=productos_acumulados or [],
         cotizacion_recibida=cotizacion_recibida,
@@ -5300,7 +5466,7 @@ async def _guardar_y_responder_turno(
     return {
         "respuesta": respuesta,
         "etapa": etapa,
-        "opciones": (necesidad_ctx or {}).get("opciones_actuales") or None,
+        "opciones": necesidad_ctx.get("opciones_actuales") or None,
         "items_resultado": items_resultado or None,
         "cliente": cliente or None,
     }
@@ -5369,6 +5535,19 @@ async def procesar_turno(
 
     # Corrige datos históricos contaminados por botones de acción.
     cliente = _sanitizar_cliente_control(cliente)
+
+    # Al cotizar, nombre/correo deben pedirse otra vez en esta solicitud,
+    # aunque existan en memoria permanente de pruebas anteriores.
+    if (necesidad_ctx or {}).get("forzar_contacto_cotizacion"):
+        if "nombre" in cliente_sesion and str(cliente_sesion.get("nombre") or "").strip():
+            cliente["nombre"] = cliente_sesion["nombre"]
+        else:
+            cliente.pop("nombre", None)
+
+        if "email" in cliente_sesion and str(cliente_sesion.get("email") or "").strip():
+            cliente["email"] = cliente_sesion["email"]
+        else:
+            cliente.pop("email", None)
 
     productos_acumulados = session.get("productos_acumulados", [])
 
@@ -5580,10 +5759,15 @@ async def procesar_turno(
     # ══════════════════════════════════════════════════════
     # Si el turno pertenece a una etapa comercial, se resuelve aquí
     # y se retorna inmediatamente. No catálogo. No LLM. No reglas posteriores.
+    # Excepción: un correo no cuenta como identificador de producto.
+    tiene_email = bool(EMAIL_RE.search(mensaje or ""))
+    bloquear_por_identificador = bool(tipo_identificador) and not (
+        tiene_email and etapa in ESTADOS_COMERCIALES
+    )
     if (
         mensaje.strip()
         and not (archivo_bytes and archivo_nombre)
-        and not tipo_identificador
+        and not bloquear_por_identificador
     ):
         comercial = _manejar_estado_comercial_prioritario(
             etapa=etapa,
@@ -5690,29 +5874,52 @@ async def procesar_turno(
             "ts": datetime.utcnow().isoformat(),
         }
 
-        nueva_etapa = "procesando_archivo"
+        # Un solo producto exacto → mismo flujo comercial (sí/no → cantidad).
+        # Evita que el LLM reescriba la ficha y deje la etapa en procesando_archivo.
+        if len(encontrados) == 1 and len(items_resultado) == 1:
+            producto = encontrados[0]["producto"]
+            cantidad_archivo = encontrados[0].get("cantidad")
+            if productos_acumulados:
+                productos_acumulados[-1]["cantidad"] = cantidad_archivo
+                productos_acumulados[-1]["desde"] = "archivo"
 
-        resumen = (
-            f"[ARCHIVO: {archivo_nombre}]\n"
-            f"Total: {len(items)} · Encontrados: {len(encontrados)} · "
-            f"Pendientes/por validar: {len(pendientes)}\n"
-        )
+            contexto_extra = _marcar_respuesta_segura(
+                "Gracias por enviarlo, lo reviso ahora mismo.\n\n"
+                + respuesta_producto_encontrado(producto, cliente)
+            )
+            nueva_etapa = "producto_encontrado"
+            necesidad_ctx = _ctx_confirmacion_producto()
+            logger.info(
+                "Archivo con 1 producto exacto → flujo comercial producto_encontrado: %s",
+                producto.get("codigo"),
+            )
+        else:
+            nueva_etapa = "procesando_archivo"
 
-        for item_resultado in items_resultado:
-            resumen += f"- {item_resultado['texto_original']}: {item_resultado['estado'].upper()}"
+            resumen = (
+                f"[ARCHIVO: {archivo_nombre}]\n"
+                f"Total: {len(items)} · Encontrados: {len(encontrados)} · "
+                f"Pendientes/por validar: {len(pendientes)}\n"
+            )
 
-            if item_resultado.get("producto"):
-                p = item_resultado["producto"]
-                resumen += f" → {p.get('codigo')} | {p.get('nombre')}"
+            for item_resultado in items_resultado:
+                resumen += (
+                    f"- {item_resultado['texto_original']}: "
+                    f"{item_resultado['estado'].upper()}"
+                )
 
-                if item_resultado["estado"] == "relacionado":
-                    resumen += " [RELACIONADO — REQUIERE CONFIRMACIÓN]"
-                elif not item_resultado.get("exacto", True):
-                    resumen += " [COINCIDENCIA CERCANA]"
+                if item_resultado.get("producto"):
+                    p = item_resultado["producto"]
+                    resumen += f" → {p.get('codigo')} | {p.get('nombre')}"
 
-            resumen += "\n"
+                    if item_resultado["estado"] == "relacionado":
+                        resumen += " [RELACIONADO — REQUIERE CONFIRMACIÓN]"
+                    elif not item_resultado.get("exacto", True):
+                        resumen += " [COINCIDENCIA CERCANA]"
 
-        contexto_extra = resumen
+                resumen += "\n"
+
+            contexto_extra = resumen
 
     # ══════════════════════════════════════════════════════
     # MODO TEXTO
@@ -6051,78 +6258,101 @@ async def procesar_turno(
         # Caso 2b: confirmación de marca para referencia ambigua
         elif etapa == "esperando_marca_referencia" and necesidad_ctx.get("referencia_pendiente"):
             referencia = str(necesidad_ctx.get("referencia_pendiente") or "").strip()
-            marca = _extraer_marca_de_respuesta(mensaje)
             match_campo = necesidad_ctx.get("match_campo_referencia") or "REFERENCIA"
+            candidatos_ctx = list(necesidad_ctx.get("candidatos_referencia") or [])
+            opciones_marca = _opciones_marcas_referencia(candidatos_ctx)
 
-            if not marca:
+            # Cliente eligió "Otro": pedir marca en texto libre.
+            if _normalizar_intencion(mensaje) in {"otro", "otra", "otra marca"}:
                 contexto_extra = _marcar_respuesta_segura(
-                    "Para confirmar la referencia, indícame la marca (MARCA_LET)."
+                    "Perfecto. Escríbeme la marca para confirmar la referencia."
                 )
                 nueva_etapa = "esperando_marca_referencia"
+                necesidad_ctx = {
+                    **necesidad_ctx,
+                    "esperando_marca_libre": True,
+                    "opciones_actuales": [],
+                }
             else:
-                res_ref = await buscar_por_referencia(referencia, marca=marca)
+                marca = _extraer_marca_de_respuesta(mensaje)
 
-                if res_ref.get("estado") == "encontrado" and res_ref.get("producto"):
-                    contexto_extra, nueva_etapa, necesidad_ctx = (
-                        construir_respuesta_desde_resultado(
-                            res={
-                                "estado": "encontrado",
-                                "producto": res_ref["producto"],
-                            },
-                            cliente=cliente,
-                            productos_acumulados=productos_acumulados,
-                            desde="referencia_marca_confirmada",
-                            necesidad_ctx_base={
-                                "texto_original": (
-                                    necesidad_ctx.get("texto_original") or mensaje
-                                ),
-                                "query_evaluada": referencia,
-                                "marca_confirmada": marca,
-                                "match_campo_referencia": res_ref.get("match_campo"),
-                            },
-                        )
+                if not marca:
+                    contexto_extra = _marcar_respuesta_segura(
+                        "Para confirmar la referencia, indícame la marca."
                     )
-                elif res_ref.get("estado") == "necesita_marca":
-                    candidatos_filtrados = list(res_ref.get("candidatos") or [])
-                    if marca and not candidatos_filtrados:
-                        contexto_extra = _marcar_respuesta_segura(
-                            f"No encontré la referencia {referencia} con marca {marca}. "
-                            "¿Puedes verificar la marca o compartir otra?"
-                        )
-                        nueva_etapa = "esperando_marca_referencia"
-                    else:
+                    nueva_etapa = "esperando_marca_referencia"
+                    necesidad_ctx = {
+                        **necesidad_ctx,
+                        "opciones_actuales": opciones_marca,
+                    }
+                else:
+                    res_ref = await buscar_por_referencia(referencia, marca=marca)
+
+                    if res_ref.get("estado") == "encontrado" and res_ref.get("producto"):
                         contexto_extra, nueva_etapa, necesidad_ctx = (
                             construir_respuesta_desde_resultado(
                                 res={
-                                    "estado": "necesita_marca",
-                                    "referencia_buscada": referencia,
-                                    "candidatos": candidatos_filtrados,
-                                    "match_campo": (
-                                        res_ref.get("match_campo") or match_campo
-                                    ),
+                                    "estado": "encontrado",
+                                    "producto": res_ref["producto"],
                                 },
                                 cliente=cliente,
                                 productos_acumulados=productos_acumulados,
-                                desde="referencia_marca_pendiente",
+                                desde="referencia_marca_confirmada",
                                 necesidad_ctx_base={
                                     "texto_original": (
                                         necesidad_ctx.get("texto_original") or mensaje
                                     ),
                                     "query_evaluada": referencia,
-                                    "marca_intentada": marca,
+                                    "marca_confirmada": marca,
+                                    "match_campo_referencia": res_ref.get("match_campo"),
                                 },
                             )
                         )
-                else:
-                    contexto_extra = _marcar_respuesta_segura(
-                        f"No encontré un producto con la referencia {referencia} "
-                        f"y marca {marca} en el catálogo."
-                    )
-                    nueva_etapa = "esperando_marca_referencia"
-                    necesidad_ctx = {
-                        **necesidad_ctx,
-                        "opciones_actuales": [],
-                    }
+                    elif res_ref.get("estado") == "necesita_marca":
+                        candidatos_filtrados = list(res_ref.get("candidatos") or [])
+                        if marca and not candidatos_filtrados:
+                            contexto_extra = _marcar_respuesta_segura(
+                                f"No encontré la referencia {referencia} con marca {marca}. "
+                                "¿Puedes verificar la marca o compartir otra?"
+                            )
+                            nueva_etapa = "esperando_marca_referencia"
+                            necesidad_ctx = {
+                                **necesidad_ctx,
+                                "opciones_actuales": opciones_marca,
+                            }
+                        else:
+                            contexto_extra, nueva_etapa, necesidad_ctx = (
+                                construir_respuesta_desde_resultado(
+                                    res={
+                                        "estado": "necesita_marca",
+                                        "referencia_buscada": referencia,
+                                        "candidatos": candidatos_filtrados or candidatos_ctx,
+                                        "match_campo": (
+                                            res_ref.get("match_campo") or match_campo
+                                        ),
+                                    },
+                                    cliente=cliente,
+                                    productos_acumulados=productos_acumulados,
+                                    desde="referencia_marca_pendiente",
+                                    necesidad_ctx_base={
+                                        "texto_original": (
+                                            necesidad_ctx.get("texto_original") or mensaje
+                                        ),
+                                        "query_evaluada": referencia,
+                                        "marca_intentada": marca,
+                                    },
+                                )
+                            )
+                    else:
+                        contexto_extra = _marcar_respuesta_segura(
+                            f"No encontré un producto con la referencia {referencia} "
+                            f"y marca {marca} en el catálogo."
+                        )
+                        nueva_etapa = "esperando_marca_referencia"
+                        necesidad_ctx = {
+                            **necesidad_ctx,
+                            "opciones_actuales": opciones_marca,
+                        }
 
         # Caso 3b: respuesta a preguntas de descubrimiento (una por turno)
         elif etapa == "descubrimiento" and necesidad_ctx.get("preguntas_pendientes"):
@@ -6485,6 +6715,15 @@ async def procesar_turno(
         if resto:
             resto = resto[0].upper() + resto[1:]
         respuesta = f"{greeting_prefix} {resto}".strip()
+
+    # Si se pregunta validación técnica de cotización, siempre van botones Sí/No.
+    resp_norm = (respuesta or "").lower()
+    if "cumple con lo que necesitas t" in resp_norm and "cotizaci" in resp_norm:
+        nueva_etapa = "cotizacion_enviada"
+        necesidad_ctx = {
+            **(necesidad_ctx or {}),
+            **_ctx_confirmacion_cotizacion_tecnica(),
+        }
 
     logger.info("Respuesta generada: etapa=%s session=%s", nueva_etapa, session_id)
 

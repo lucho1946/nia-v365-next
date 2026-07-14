@@ -306,9 +306,60 @@ def normalizar_producto(prod: dict) -> dict:
 # BÚSQUEDA POR CÓDIGO / REFERENCIA
 # ============================================================
 
+def normalizar_referencia(valor: str) -> str:
+    """
+    Forma canónica para comparar referencias:
+    quita guiones, barras, espacios y puntos; mayúsculas.
+    Ej: "EFS-40/S1" y "efs 40 s1" → "EFS40S1"
+    """
+    texto = _clean_text(valor).upper()
+    return re.sub(r"[\s\-_./]+", "", texto)
+
+
+def variantes_referencia_exacta(valor: str) -> list[str]:
+    """
+    Variantes mecánicas exactas del valor de entrada para $or / $in.
+
+    Solo transforma separadores ya presentes (guion, barra, espacio, punto):
+    no reconstruye tokens ni inventa separadores nuevos.
+    """
+    crudo = _clean_text(valor)
+    if not crudo:
+        return []
+
+    upper = crudo.upper()
+    compacta = normalizar_referencia(crudo)
+
+    variantes = {crudo, upper, compacta}
+
+    # Misma secuencia, cambiando solo el tipo de separador.
+    guiones = re.sub(r"[\s_/.]+", "-", upper)
+    guiones = re.sub(r"-{2,}", "-", guiones).strip("-")
+    if guiones:
+        variantes.add(guiones)
+
+    barras = re.sub(r"[\s\-_.]+", "/", upper)
+    barras = re.sub(r"/{2,}", "/", barras).strip("/")
+    if barras:
+        variantes.add(barras)
+
+    espacios = re.sub(r"[\-_./]+", " ", upper)
+    espacios = re.sub(r"\s+", " ", espacios).strip()
+    if espacios:
+        variantes.add(espacios)
+
+    puntos = re.sub(r"[\s\-_./]+", ".", upper)
+    puntos = re.sub(r"\.{2,}", ".", puntos).strip(".")
+    if puntos:
+        variantes.add(puntos)
+
+    return list(variantes)
+
+
 async def buscar_por_codigo(codigo: str) -> Optional[dict]:
     """
     Busca por CODIGO, REFERENCIA o REF_ALTERNATIVA exactos.
+    Incluye variantes mecánicas de separadores (sin fuzzy ni regex).
     """
     valor = _clean_text(codigo)
 
@@ -318,18 +369,18 @@ async def buscar_por_codigo(codigo: str) -> Optional[dict]:
     db = get_db()
     collection = db[PRODUCTS_COLLECTION]
 
-    valor_upper = valor.upper()
+    variantes = variantes_referencia_exacta(valor)
+    or_clauses = []
+    for v in variantes:
+        or_clauses.extend(
+            [
+                {"CODIGO": v},
+                {"REFERENCIA": v},
+                {"REF_ALTERNATIVA": v},
+            ]
+        )
 
-    query = {
-        "$or": [
-            {"CODIGO": valor},
-            {"CODIGO": valor_upper},
-            {"REFERENCIA": valor},
-            {"REFERENCIA": valor_upper},
-            {"REF_ALTERNATIVA": valor},
-            {"REF_ALTERNATIVA": valor_upper},
-        ]
-    }
+    query = {"$or": or_clauses}
 
     prod = await collection.find_one(query, {"_id": 0})
 
@@ -354,24 +405,8 @@ def _marca_coincide(marca_producto: str, marca_cliente: str) -> bool:
 
 
 def _variantes_referencia(valor: str) -> list[str]:
-    """Genera variantes comunes de una referencia (mayúsculas, guiones, compacta)."""
-    valor = _clean_text(valor)
-    if not valor:
-        return []
-
-    variantes = {valor, valor.upper()}
-    compacta = re.sub(r"[\s\-_./]+", "", valor, flags=re.IGNORECASE).upper()
-    if compacta:
-        variantes.add(compacta)
-    guiones = re.sub(r"\s+", "-", valor.strip()).upper()
-    if guiones:
-        variantes.add(guiones)
-    espacios = re.sub(r"[\-_./]+", " ", valor.strip()).upper()
-    espacios = re.sub(r"\s+", " ", espacios).strip()
-    if espacios:
-        variantes.add(espacios)
-
-    return list(variantes)
+    """Alias: mismas variantes mecánicas exactas que buscar_por_codigo."""
+    return variantes_referencia_exacta(valor)
 
 
 async def _buscar_campo_exacto(collection, campo: str, valor: str) -> list:
