@@ -1366,6 +1366,11 @@ def detectar_modo_busqueda(texto: str) -> str:
     if _parece_solicitud_de_producto(texto):
         return "producto"
 
+    # Familia/nombre de producto con 2+ tokens útiles, aunque no diga "necesito".
+    # Ej.: "Calentadores de gabinetes", "destornillador de 3-16".
+    if len(_tokens_producto_cliente(texto)) >= 2:
+        return "producto"
+
     return "ambiguo"
 
 
@@ -1589,6 +1594,10 @@ def _parece_solicitud_de_producto(texto: str) -> bool:
     Es una detección general de intención comercial, no una regla por producto.
     """
     t = texto.lower().strip()
+
+    # Nombre de familia/producto sin verbo de intención: "Calentadores de gabinetes".
+    if len(_tokens_producto_cliente(texto)) >= 2:
+        return True
 
     patrones = [
         r"\bnecesito\b",
