@@ -1737,6 +1737,12 @@ PALABRAS_FUNCIONALES_MATCH = {
     "cotizar",
     "cotizacion",
     "cotización",
+    "solicitando",
+    "solicito",
+    "solicitamos",
+    "estoy",
+    "estamos",
+    "quisiera",
     "producto",
     "equipo",
     "sistema",
@@ -2645,21 +2651,26 @@ async def _iniciar_descubrimiento_producto_corta_larga(
 
     busqueda_textual = _tiene_busqueda_textual_multipalabra(mensaje)
 
-    # Si ya hay familia de variantes del mismo nombre corto (mismas DL distintas),
-    # preguntar por ficha técnica antes que por tipos NIVEL_1 genéricos.
+    # Preferir resultado de catálogo al menú NIVEL_1 cuando el texto ya es
+    # suficientemente específico (ej. "refinadora de chocolate").
     if busqueda_textual:
-        res_familia = await buscar_en_catalogo(mensaje)
-        if res_familia.get("estado") == "familia_ambigua":
+        res_catalogo = await buscar_en_catalogo(mensaje)
+        if res_catalogo.get("estado") in {
+            "familia_ambigua",
+            "encontrado",
+            "relacionado",
+            "multiples_candidatos",
+        }:
             return construir_respuesta_desde_resultado(
-                res=res_familia,
+                res=res_catalogo,
                 cliente=cliente,
                 productos_acumulados=[],
-                desde="familia_dl_inicio",
+                desde="producto_catalogo_directo",
                 necesidad_ctx_base={
                     "texto_original": mensaje,
                     "modo_busqueda": "producto",
                     "palabra_clave": palabra,
-                    "query_evaluada": res_familia.get("query_catalogo") or mensaje,
+                    "query_evaluada": res_catalogo.get("query_catalogo") or mensaje,
                 },
             )
 
@@ -2684,16 +2695,18 @@ async def _iniciar_descubrimiento_producto_corta_larga(
                 "Para ubicar el equipo correcto en catálogo:",
             )
 
-        preguntas = await generar_preguntas(mensaje, necesidad_ctx={"texto_original": mensaje})
-        return _iniciar_secuencia_preguntas(
-            {
+        # Sin tipos NIVEL_1: buscar igualmente por el texto del cliente.
+        return await _buscar_y_responder_descubrimiento(
+            query_e=mensaje,
+            necesidad_ctx={
                 "texto_original": mensaje,
                 "modo_busqueda": "producto",
                 "palabra_clave": palabra,
+                "query_evaluada": mensaje,
             },
-            preguntas,
-            cliente,
-            "No encontré tipos claros en catálogo. Necesito un dato:",
+            cliente=cliente,
+            productos_acumulados=[],
+            desde="producto_sin_nivel_1",
         )
 
     if busqueda_textual:
