@@ -1,9 +1,8 @@
 """
 Guardrail comercial de cotización.
 
-La NIA experimental no debe afirmar que enviará una cotización
-por correo mientras no exista una integración real que la genere
-y la despache.
+Confirma el cierre de solicitud y comunica que la cotización
+llegará lo más pronto posible.
 """
 
 from pathlib import Path
@@ -13,39 +12,38 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 MAIN_FILE = BASE_DIR / "main.py"
 
 
-def test_no_promete_envio_de_cotizacion() -> None:
-    source = MAIN_FILE.read_text(encoding="utf-8-sig")
-
-    forbidden = (
-        "En breve recibirás la cotización en tu correo."
-    )
-
-    assert forbidden not in source, (
-        "NIA no debe prometer un envío de cotización "
-        "que no ha ocurrido."
-    )
-
-
-def test_informa_estado_real_de_la_solicitud() -> None:
+def test_mensaje_cierre_solicitud() -> None:
     source = MAIN_FILE.read_text(encoding="utf-8-sig")
 
     expected = (
-        "La cotización aún no ha sido emitida ni enviada."
+        "La cotización llegará lo más pronto posible."
     )
 
     assert expected in source, (
-        "La respuesta debe informar que la cotización "
-        "todavía requiere validación."
+        "La respuesta de cierre debe indicar que la "
+        "cotización llegará lo más pronto posible."
+    )
+
+
+def test_sin_mensaje_antiguo_de_asesor() -> None:
+    source = MAIN_FILE.read_text(encoding="utf-8-sig")
+
+    forbidden = (
+        "Un asesor debe validarla y continuar el proceso."
+    )
+
+    assert forbidden not in source, (
+        "Ya no debe usarse el mensaje de validación "
+        "por asesor en el cierre de cotización."
     )
 
 
 def run() -> None:
-    test_no_promete_envio_de_cotizacion()
-    test_informa_estado_real_de_la_solicitud()
+    test_mensaje_cierre_solicitud()
+    test_sin_mensaje_antiguo_de_asesor()
 
     print(
-        "OK: la confirmación comercial no promete "
-        "un envío inexistente."
+        "OK: mensaje de cierre de cotización actualizado."
     )
 
 

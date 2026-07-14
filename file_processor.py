@@ -6,11 +6,128 @@ Cada ítem retornado tiene: texto, fila (opcional), campo_detectado
 
 import io
 import os
+import re
 import base64
-from typing import List, Dict
+from typing import List, Dict, Optional
 import httpx
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+
+def _texto_desde_pdf_bytes(contenido: bytes) -> str:
+    """Extrae texto de un PDF con pdfplumber → pypdf → PyMuPDF."""
+    # 1) pdfplumber (mejor layout en formularios DIAN/RUT)
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(io.BytesIO(contenido)) as pdf:
+            partes = [(pg.extract_text() or "") for pg in pdf.pages]
+        texto = "\n".join(partes).strip()
+        if texto:
+            return texto
+    except Exception:
+        pass
+
+    # 2) pypdf
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(contenido))
+        texto = "\n".join((pg.extract_text() or "") for pg in reader.pages).strip()
+        if texto:
+            return texto
+    except Exception:
+        pass
+
+    # 3) PyMuPDF
+    try:
+        import fitz
+
+        doc = fitz.open(stream=contenido, filetype="pdf")
+        texto = "\n".join(page.get_text("text") or "" for page in doc).strip()
+        if texto:
+            return texto
+    except Exception:
+        pass
+
+    return ""
+
+
+def _parece_pdf_rut(texto: str, nombre: str = "") -> bool:
+    nombre_l = (nombre or "").lower()
+    if re.search(r"\brut\b", nombre_l):
+        return True
+    if not texto:
+        return False
+    # Exigir señales fuertes del formulario DIAN (casillas 5/6/35).
+    tiene_nit = bool(
+        re.search(
+            r"n[uú]mero de identificaci[oó]n tributaria|\(NIT\)\s*6\.\s*DV",
+            texto,
+            re.IGNORECASE,
+        )
+    )
+    tiene_razon = bool(
+        re.search(r"35\.\s*raz.?n social", texto, re.IGNORECASE)
+    )
+    return tiene_nit and tiene_razon
+
+
+def extraer_datos_rut_pdf(contenido: bytes, nombre: str = "") -> Optional[Dict]:
+    """
+    Extrae del RUT (PDF DIAN) los dos datos comerciales clave:
+    - NIT + DV (casilla 5 y 6) → formato 901146454-6
+    - Razón social (casilla 35)
+
+    Retorna None si el PDF no parece un RUT.
+    """
+    texto = _texto_desde_pdf_bytes(contenido)
+    if not _parece_pdf_rut(texto, nombre):
+        return None
+
+    nit = None
+    m_nit = re.search(
+        r"5\.\s*N[uú]mero de Identificaci[oó]n Tributaria \(NIT\).*?\n\s*"
+        r"((?:\d\s*){9,12})",
+        texto,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not m_nit:
+        m_nit = re.search(
+            r"((?:\d\s+){8,10}\d)\s+Impuestos\s+de",
+            texto,
+            re.IGNORECASE,
+        )
+    if m_nit:
+        digits = re.sub(r"\s+", "", m_nit.group(1))
+        if len(digits) >= 10:
+            nit = f"{digits[:9]}-{digits[9]}"
+        elif len(digits) >= 8:
+            nit = digits
+
+    empresa = None
+    m_emp = re.search(
+        r"35\.\s*Raz.?n social\s*\n\s*([^\n]+)",
+        texto,
+        re.IGNORECASE,
+    )
+    if m_emp:
+        candidata = re.sub(r"\s+", " ", m_emp.group(1)).strip(" .,-")
+        invalidas = re.search(
+            r"nombre comercial|primer apellido|segundo apellido|"
+            r"primer nombre|sigla|ubicaci.?n|^\d+$",
+            candidata,
+            re.IGNORECASE,
+        )
+        if candidata and len(candidata) >= 3 and not invalidas:
+            empresa = candidata.upper() if candidata.isupper() else candidata
+
+    return {
+        "es_rut": True,
+        "nit": nit,
+        "empresa": empresa,
+        "dv": (nit.split("-")[1] if nit and "-" in nit else None),
+    }
 
 # ─── Dispatcher principal ─────────────────────────────────────────────────────
 async def procesar_archivo(contenido: bytes, nombre: str) -> List[Dict]:
@@ -106,24 +223,21 @@ def extraer_csv(contenido: bytes) -> List[Dict]:
 
 # ─── PDF ──────────────────────────────────────────────────────────────────────
 def extraer_pdf(contenido: bytes) -> List[Dict]:
-    import fitz  # PyMuPDF
-    doc   = fitz.open(stream=contenido, filetype="pdf")
+    texto = _texto_desde_pdf_bytes(contenido)
     items = []
     linea_idx = 0
 
-    for page in doc:
-        texto_pagina = page.get_text("text")
-        for linea in texto_pagina.splitlines():
-            linea = linea.strip()
-            if len(linea) < 3:
-                continue
-            linea_idx += 1
-            items.append({
-                "texto":           linea,
-                "fila":            linea_idx,
-                "campo_detectado": "texto_libre",
-                "cantidad":        None,
-            })
+    for linea in (texto or "").splitlines():
+        linea = linea.strip()
+        if len(linea) < 3:
+            continue
+        linea_idx += 1
+        items.append({
+            "texto":           linea,
+            "fila":            linea_idx,
+            "campo_detectado": "texto_libre",
+            "cantidad":        None,
+        })
 
     # Si no extrajo texto (PDF escaneado) → retorna ítem especial para OCR
     if not items:

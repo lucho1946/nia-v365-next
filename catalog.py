@@ -100,11 +100,45 @@ def _tokens(text: str) -> list[str]:
     normalized = _normalize_text(text)
     raw_tokens = re.findall(r"[a-z0-9ñ]+", normalized)
 
+    # Tokens 100% numéricos pasan siempre (77, 99, 24).
+    # El mínimo de 3 caracteres aplica solo a tokens alfabéticos.
     return [
         token
         for token in raw_tokens
-        if len(token) >= 3
+        if token.isdigit() or len(token) >= 3
     ]
+
+
+def _variantes_token_busqueda(token: str) -> list[str]:
+    """
+    Variantes morfológicas mínimas ES para catálogo.
+
+    Ej.: analizadores ↔ analizador
+    Evita perder categoría cuando el cliente escribe plural y el
+    producto está en singular (o al revés).
+    """
+    t = _normalize_text(token)
+    if not t or len(t) < 3:
+        return []
+
+    variantes = [t]
+
+    if len(t) > 5 and t.endswith("es"):
+        variantes.append(t[:-2])
+    elif len(t) > 4 and t.endswith("s"):
+        variantes.append(t[:-1])
+    else:
+        variantes.append(t + "es")
+        variantes.append(t + "s")
+
+    # Dedup preservando orden.
+    vistos = set()
+    out = []
+    for v in variantes:
+        if v and v not in vistos and len(v) >= 3:
+            vistos.add(v)
+            out.append(v)
+    return out
 
 
 def _first_value(prod: dict, keys: list[str], default: Any = "") -> Any:
@@ -306,9 +340,60 @@ def normalizar_producto(prod: dict) -> dict:
 # BÚSQUEDA POR CÓDIGO / REFERENCIA
 # ============================================================
 
+def normalizar_referencia(valor: str) -> str:
+    """
+    Forma canónica para comparar referencias:
+    quita guiones, barras, espacios y puntos; mayúsculas.
+    Ej: "EFS-40/S1" y "efs 40 s1" → "EFS40S1"
+    """
+    texto = _clean_text(valor).upper()
+    return re.sub(r"[\s\-_./]+", "", texto)
+
+
+def variantes_referencia_exacta(valor: str) -> list[str]:
+    """
+    Variantes mecánicas exactas del valor de entrada para $or / $in.
+
+    Solo transforma separadores ya presentes (guion, barra, espacio, punto):
+    no reconstruye tokens ni inventa separadores nuevos.
+    """
+    crudo = _clean_text(valor)
+    if not crudo:
+        return []
+
+    upper = crudo.upper()
+    compacta = normalizar_referencia(crudo)
+
+    variantes = {crudo, upper, compacta}
+
+    # Misma secuencia, cambiando solo el tipo de separador.
+    guiones = re.sub(r"[\s_/.]+", "-", upper)
+    guiones = re.sub(r"-{2,}", "-", guiones).strip("-")
+    if guiones:
+        variantes.add(guiones)
+
+    barras = re.sub(r"[\s\-_.]+", "/", upper)
+    barras = re.sub(r"/{2,}", "/", barras).strip("/")
+    if barras:
+        variantes.add(barras)
+
+    espacios = re.sub(r"[\-_./]+", " ", upper)
+    espacios = re.sub(r"\s+", " ", espacios).strip()
+    if espacios:
+        variantes.add(espacios)
+
+    puntos = re.sub(r"[\s\-_./]+", ".", upper)
+    puntos = re.sub(r"\.{2,}", ".", puntos).strip(".")
+    if puntos:
+        variantes.add(puntos)
+
+    return list(variantes)
+
+
 async def buscar_por_codigo(codigo: str) -> Optional[dict]:
     """
     Busca por CODIGO, REFERENCIA o REF_ALTERNATIVA exactos.
+    Incluye variantes mecánicas de separadores (sin fuzzy ni regex).
     """
     valor = _clean_text(codigo)
 
@@ -318,18 +403,18 @@ async def buscar_por_codigo(codigo: str) -> Optional[dict]:
     db = get_db()
     collection = db[PRODUCTS_COLLECTION]
 
-    valor_upper = valor.upper()
+    variantes = variantes_referencia_exacta(valor)
+    or_clauses = []
+    for v in variantes:
+        or_clauses.extend(
+            [
+                {"CODIGO": v},
+                {"REFERENCIA": v},
+                {"REF_ALTERNATIVA": v},
+            ]
+        )
 
-    query = {
-        "$or": [
-            {"CODIGO": valor},
-            {"CODIGO": valor_upper},
-            {"REFERENCIA": valor},
-            {"REFERENCIA": valor_upper},
-            {"REF_ALTERNATIVA": valor},
-            {"REF_ALTERNATIVA": valor_upper},
-        ]
-    }
+    query = {"$or": or_clauses}
 
     prod = await collection.find_one(query, {"_id": 0})
 
@@ -342,6 +427,104 @@ async def buscar_por_codigo(codigo: str) -> Optional[dict]:
     normalizado["_score"] = 1.0
 
     return normalizado
+
+
+def _marca_coincide(marca_producto: str, marca_cliente: str) -> bool:
+    """Compara marca del catálogo con la indicada por el cliente."""
+    mp = _clean_text(marca_producto).lower()
+    mc = _clean_text(marca_cliente).lower()
+    if not mp or not mc:
+        return False
+    return mp == mc or mc in mp or mp in mc
+
+
+def _variantes_referencia(valor: str) -> list[str]:
+    """Alias: mismas variantes mecánicas exactas que buscar_por_codigo."""
+    return variantes_referencia_exacta(valor)
+
+
+async def _buscar_campo_exacto(collection, campo: str, valor: str) -> list:
+    """Busca coincidencia exacta en REFERENCIA o REF_ALTERNATIVA."""
+    variantes = _variantes_referencia(valor)
+    if not variantes:
+        return []
+
+    query = {campo: {"$in": variantes}}
+    cursor = collection.find(query, {"_id": 0}).limit(50)
+    docs = await cursor.to_list(50)
+    return [normalizar_producto(doc) for doc in docs]
+
+
+async def buscar_por_referencia(valor: str, marca: Optional[str] = None) -> dict:
+    """
+    Búsqueda por referencia con prioridad comercial:
+
+    1. REFERENCIA (exacta)
+    2. REF_ALTERNATIVA (exacta)
+
+    Reglas:
+    - 1 match en REFERENCIA → entrega directa (confianza alta).
+    - Varios matches o solo REF_ALTERNATIVA → pide MARCA_LET.
+    - Con marca del cliente → filtra y entrega si queda 1.
+    """
+    valor = _clean_text(valor)
+    if not valor:
+        return {"estado": "sin_resultado", "candidatos": [], "match_campo": None}
+
+    db = get_db()
+    collection = db[PRODUCTS_COLLECTION]
+
+    refs = await _buscar_campo_exacto(collection, "REFERENCIA", valor)
+    if marca:
+        refs = [p for p in refs if _marca_coincide(p.get("marca", ""), marca)]
+
+    if len(refs) == 1:
+        prod = refs[0]
+        prod["_match_type"] = "exacto_referencia"
+        prod["_score"] = 1.0
+        return {
+            "estado": "encontrado",
+            "producto": prod,
+            "candidatos": refs,
+            "match_campo": "REFERENCIA",
+            "confianza": "alta",
+        }
+
+    if len(refs) > 1:
+        return {
+            "estado": "necesita_marca",
+            "producto": None,
+            "candidatos": refs,
+            "match_campo": "REFERENCIA",
+            "confianza": "baja",
+        }
+
+    alts = await _buscar_campo_exacto(collection, "REF_ALTERNATIVA", valor)
+    if marca:
+        alts = [p for p in alts if _marca_coincide(p.get("marca", ""), marca)]
+
+    if len(alts) == 1 and marca:
+        prod = alts[0]
+        prod["_match_type"] = "exacto_ref_alternativa"
+        prod["_score"] = 0.95
+        return {
+            "estado": "encontrado",
+            "producto": prod,
+            "candidatos": alts,
+            "match_campo": "REF_ALTERNATIVA",
+            "confianza": "media",
+        }
+
+    if len(alts) >= 1:
+        return {
+            "estado": "necesita_marca",
+            "producto": None,
+            "candidatos": alts,
+            "match_campo": "REF_ALTERNATIVA",
+            "confianza": "baja",
+        }
+
+    return {"estado": "sin_resultado", "candidatos": [], "match_campo": None}
 
 
 # ============================================================
@@ -367,23 +550,30 @@ def _build_mongo_text_query(query: str) -> dict:
     # Limitamos tokens para evitar consultas demasiado pesadas.
     tokens = tokens[:6]
 
+    campos_texto = [
+        "texto_busqueda",
+        "DESCRIPCION_CORTA_PRE",
+        "DESCRIPCION_LARGA_PRE",
+        "NIVEL_0",
+        "NIVEL_1",
+        "NIVEL_2",
+        "NIVEL_3",
+        "NIVEL_4",
+        "REFERENCIA",
+        "MARCA_LET",
+    ]
+
     and_filters = []
 
     for token in tokens:
-        safe = re.escape(token)
-        and_filters.append(
-            {
-                "$or": [
-                    {"texto_busqueda": {"$regex": safe, "$options": "i"}},
-                    {"DESCRIPCION_CORTA_PRE": {"$regex": safe, "$options": "i"}},
-                    {"DESCRIPCION_LARGA_PRE": {"$regex": safe, "$options": "i"}},
-                    {"NIVEL_4": {"$regex": safe, "$options": "i"}},
-                    {"NIVEL_3": {"$regex": safe, "$options": "i"}},
-                    {"REFERENCIA": {"$regex": safe, "$options": "i"}},
-                    {"MARCA_LET": {"$regex": safe, "$options": "i"}},
-                ]
-            }
-        )
+        variantes = _variantes_token_busqueda(token) or [token]
+        or_filters = []
+        for variante in variantes:
+            safe = re.escape(variante)
+            for campo in campos_texto:
+                or_filters.append({campo: {"$regex": safe, "$options": "i"}})
+
+        and_filters.append({"$or": or_filters})
 
     base_filter = {
         "$and": and_filters
@@ -836,6 +1026,64 @@ def _extraer_campos_query(texto: str) -> dict:
     t = t_original.lower()
 
     # ------------------------------------------------------------
+    # 0. Dimensiones (caja/gabinete, etc.)
+    # Ejemplos: 77 X 99 X 24 | 77x99x24mm | 60 x 80 x 20 cm
+    # Normalización: números ordenados ascendente unidos con "x"
+    # para que "77 X 99 X 24" y "24x77x99" generen el mismo valor.
+    # ------------------------------------------------------------
+    dims = re.search(
+        r"\b(\d+[\.,]?\d*)\s*[x×]\s*(\d+[\.,]?\d*)"
+        r"(?:\s*[x×]\s*(\d+[\.,]?\d*))?\s*(mm|cm)?\b",
+        t,
+        re.IGNORECASE,
+    )
+    if dims:
+        nums: list[float] = []
+        for g in dims.groups()[:3]:
+            if g is None:
+                continue
+            if str(g).lower() in {"mm", "cm"}:
+                continue
+            try:
+                nums.append(float(str(g).replace(",", ".")))
+            except ValueError:
+                continue
+        if len(nums) >= 2:
+            partes = []
+            for n in sorted(nums):
+                if float(n).is_integer():
+                    partes.append(str(int(n)))
+                else:
+                    partes.append(str(n).rstrip("0").rstrip("."))
+            campos["dimensiones"] = "x".join(partes)
+
+    # ------------------------------------------------------------
+    # 0b. Calibre fraccional en pulgadas
+    # Ejemplos: 3/16", 3-16 pulgadas, 1/2 inch
+    # No debe interpretarse como rango "3 a 16".
+    # ------------------------------------------------------------
+    calibre = re.search(
+        r"\b(\d{1,2})\s*[/\-]\s*(\d{1,2})\s*"
+        r"(?:pulgadas?|pulg\.?|inch(?:es)?|in\.?|\")",
+        t,
+        re.IGNORECASE,
+    )
+    if calibre:
+        a_raw, b_raw = calibre.groups()
+        try:
+            a_i, b_i = int(float(a_raw.replace(",", "."))), int(
+                float(b_raw.replace(",", "."))
+            )
+        except ValueError:
+            a_i, b_i = None, None
+        if (
+            a_i is not None
+            and b_i in {2, 4, 8, 16, 32, 64}
+            and 0 < a_i < b_i
+        ):
+            campos["calibre"] = f"{a_i}/{b_i} in"
+
+    # ------------------------------------------------------------
     # 1. Rangos numéricos con unidades técnicas
     # Ejemplos:
     # - 0 a 10 bar
@@ -850,9 +1098,22 @@ def _extraer_campos_query(texto: str) -> dict:
         re.IGNORECASE,
     )
 
-    if rango:
+    if rango and "calibre" not in campos:
         inicio, fin, unidad = rango.groups()
-        campos["rango"] = f"{inicio} a {fin} {unidad}"
+        unidad_l = (unidad or "").lower()
+        # Evita 3-16 pulgadas → falso rango "3 a 16".
+        es_fraccion_pulgada = False
+        if re.search(r"pulg|inch|^in$", unidad_l):
+            try:
+                a_f = float(str(inicio).replace(",", "."))
+                b_f = float(str(fin).replace(",", "."))
+                if b_f in {2, 4, 8, 16, 32, 64} and 0 < a_f < b_f:
+                    es_fraccion_pulgada = True
+                    campos["calibre"] = f"{int(a_f)}/{int(b_f)} in"
+            except ValueError:
+                pass
+        if not es_fraccion_pulgada:
+            campos["rango"] = f"{inicio} a {fin} {unidad}"
 
     # Valor único con unidad cuando no hay rango.
     # Ejemplo: 80 C, 24 VDC, 50 l/min, 10 bar.
@@ -911,7 +1172,7 @@ def _extraer_campos_query(texto: str) -> dict:
     # - conexión bridada
     # ------------------------------------------------------------
     conexion_medida = re.search(
-        r"\b(\d+/\d+|\d+\.\d+|\d+)\s*(?:\"|''|pulg|pulgada|pulgadas)?\s*"
+        r"\b(\d+/\d+|\d+\.\d+|\d+)\s*(?:\"|''|pulgadas|pulgada|pulg|inch|inches|in)?\s*"
         r"([a-zA-Z]{2,10})\b",
         t,
         re.IGNORECASE,
@@ -924,6 +1185,7 @@ def _extraer_campos_query(texto: str) -> dict:
         if "/" in medida and tipo.lower() not in {
             "v", "vac", "vdc", "ma", "a", "hz", "bar", "psi",
             "pulg", "pulgada", "pulgadas", "inch", "inches", "in",
+            "adas",  # resto de "pulg"+"adas" si el regex corta mal
         }:
             campos["conexion"] = f"{medida} {tipo}"
 
@@ -989,6 +1251,10 @@ def _extraer_campos_query(texto: str) -> dict:
     if voltaje:
         valor, unidad = voltaje.groups()
         campos["voltaje"] = f"{valor} {unidad.upper()}"
+
+    potencia = re.search(r"\b(\d+)\s*w\b", t, re.IGNORECASE)
+    if potencia:
+        campos["potencia"] = f"{potencia.group(1)} W"
 
     alimentacion = re.search(
         r"\b(?:alimentacion|alimentación)\s+([a-zA-Z0-9\-\s/\.]+)",
@@ -1133,7 +1399,7 @@ def _penalizacion_por_incompatibilidad(prod: dict, query: str) -> float:
 
     return 1.0
 
-def _score_producto(
+def score_producto(
     prod: dict,
     query: str,
     campos_query: Optional[dict] = None,
@@ -1145,6 +1411,7 @@ def _score_producto(
     de forma opcional, scoring por campos técnicos estructurados.
 
     Si no hay campos_query, el comportamiento sigue siendo el mismo.
+    API pública usada por buscar_en_catalogo para ordenar candidatos.
     """
     query_tokens = _tokens(query)
 
@@ -1156,6 +1423,9 @@ def _score_producto(
         [
             _clean_text(prod.get("nombre")),
             _clean_text(prod.get("categoria")),
+            _clean_text(prod.get("nivel_0")),
+            _clean_text(prod.get("nivel_1")),
+            _clean_text(prod.get("nivel_2")),
             _clean_text(prod.get("nivel_4")),
             _clean_text(prod.get("nivel_3")),
         ]
@@ -1163,6 +1433,16 @@ def _score_producto(
 
     coverage_total = _token_coverage(query_tokens, texto_total)
     coverage_nombre = _token_coverage(query_tokens, nombre_categoria)
+    coverage_nivel = _token_coverage(
+        query_tokens,
+        " ".join(
+            [
+                _clean_text(prod.get("nivel_0")),
+                _clean_text(prod.get("nivel_1")),
+                _clean_text(prod.get("nivel_2")),
+            ]
+        ),
+    )
 
     sim_nombre = _sim(query, prod.get("nombre", ""))
     sim_desc = _sim(query, prod.get("descripcion_corta", ""))
@@ -1174,18 +1454,37 @@ def _score_producto(
         score_nia_norm = 0.0
 
     score_textual = (
-        coverage_total * 0.45
-        + coverage_nombre * 0.25
-        + sim_nombre * 0.15
-        + sim_desc * 0.10
+        coverage_total * 0.40
+        + coverage_nombre * 0.22
+        + coverage_nivel * 0.13
+        + sim_nombre * 0.12
+        + sim_desc * 0.08
         + score_nia_norm * 0.05
     )
+
+    # Bonus fuerte: la categoría jerárquica coincide completa con la consulta.
+    # Ej.: query "Analizadores De Espectro" ↔ NIVEL_1 "analizadores-de-espectro".
+    if coverage_nivel >= 0.99 and len(query_tokens) >= 2:
+        score_textual = max(score_textual, 0.92)
 
     score_campos = 0.0
 
     if campos_query:
         descripcion_larga = _clean_text(prod.get("descripcion_larga"))
         campos_producto = _parsear_campos(descripcion_larga)
+        # Dimensiones también desde texto libre (sin separador ¦).
+        if campos_query.get("dimensiones"):
+            dims_prod = _extraer_campos_query(
+                " ".join(
+                    [
+                        _clean_text(prod.get("descripcion_corta")),
+                        descripcion_larga,
+                        _clean_text(prod.get("nombre")),
+                    ]
+                )
+            ).get("dimensiones")
+            if dims_prod:
+                campos_producto["dimensiones"] = dims_prod
         score_campos = _score_campos_estructurados(campos_producto, campos_query)
 
     if campos_query and score_campos > 0:
@@ -1199,6 +1498,10 @@ def _score_producto(
         score *= 0.90
 
     return round(score, 4)
+
+
+# Alias interno de compatibilidad.
+_score_producto = score_producto
 
 
 def evaluar_coincidencia(

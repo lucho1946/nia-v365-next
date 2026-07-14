@@ -1,0 +1,327 @@
+{
+  "version": "1.0.0",
+  "description": "Respuestas fijas comerciales NIA — escenarios de evaluación 01-17",
+  "corporate": {
+    "direccion": "Cl. 76 #20 B 24 Oficina 207, Edificio Centrum, Bogotá",
+    "nit": "901146454-6",
+    "telefono": "6012129044",
+    "correo": "comercial@viaindustrial.com"
+  },
+  "intents": [
+    {
+      "name": "mensaje_automatico_ignorar",
+      "priority": 100,
+      "silent": true,
+      "patterns": [
+        "gracias por comunicarte",
+        "te atenderemos lo antes posible",
+        "se te envio algo",
+        "este formato aun no es compatible",
+        "este formato aún no es compatible",
+        "mensaje automatico",
+        "respuesta automatica"
+      ],
+      "responses": []
+    },
+    {
+      "name": "asesor_humano",
+      "priority": 90,
+      "patterns": [
+        "hablar con un asesor",
+        "hablar con asesor",
+        "asesor comercial",
+        "un humano",
+        "alguien me atienda",
+        "atencion humana",
+        "quiero un asesor",
+        "pasar con un asesor",
+        "necesito un asesor",
+        "hablar con una persona",
+        "atencion personalizada"
+      ],
+      "responses": [
+        "Claro, ¿en qué te puedo ayudar? En un momento uno de nuestros asesores te atenderá.",
+        "Con gusto, ¿qué necesitas revisar? En un momento uno de nuestros asesores te atenderá."
+      ]
+    },
+    {
+      "name": "datos_corporativos",
+      "priority": 88,
+      "patterns": [
+        "direccion de oficina",
+        "cual es su direccion",
+        "cuál es su dirección",
+        "donde quedan",
+        "dónde quedan",
+        "ubicacion de la oficina",
+        "nit telefono y correo",
+        "nit, telefono y correo",
+        "nit, teléfono y correo",
+        "regalas nit",
+        "regálas nit",
+        "me regalas nit",
+        "me regalas el nit",
+        "cual es el nit",
+        "cuál es el nit",
+        "telefono comercial",
+        "teléfono comercial",
+        "correo comercial",
+        "datos de contacto"
+      ],
+      "responses": [
+        "Nuestra dirección es Cl. 76 #20 B 24 Oficina 207, Edificio Centrum, Bogotá.",
+        "Claro. NIT: 901146454-6. Teléfono: 6012129044. Correo: comercial@viaindustrial.com."
+      ],
+      "response_rules": "direccion_vs_contacto"
+    },
+    {
+      "name": "documentos_legales_bancarios",
+      "priority": 86,
+      "patterns": [
+        "certificado bancario",
+        "camara de comercio",
+        "cámara de comercio",
+        "numero de cuenta",
+        "número de cuenta",
+        "cuenta bancaria",
+        "envia el rut",
+        "envíame el rut",
+        "enviame el rut",
+        "rut y el certificado",
+        "datos bancarios",
+        "cuenta para pagar"
+      ],
+      "responses": [
+        "Claro que sí, en un momento te los enviaremos para continuar con el proceso de compra.",
+        "Claro que sí, en un momento te enviaremos esa información para continuar con el proceso de compra."
+      ]
+    },
+    {
+      "name": "pago_comprobante",
+      "priority": 84,
+      "patterns": [
+        "ya pague",
+        "ya pagué",
+        "adjunto el soporte",
+        "te adjunto el soporte",
+        "soporte de pago",
+        "comprobante de pago",
+        "consignacion bancaria",
+        "consignación bancaria",
+        "te envio la consignacion",
+        "te envío la consignación",
+        "envio el comprobante",
+        "envío el comprobante",
+        "comprobante de consignacion"
+      ],
+      "responses": [
+        "Gracias por el comprobante. ¿Podrías confirmarme dirección exacta de envío, nombre de quien recibe y celular de contacto?",
+        "Gracias por enviar la consignación. Confírmame por favor dirección exacta, nombre de quien recibe y celular de contacto."
+      ]
+    },
+    {
+      "name": "guia_envio",
+      "priority": 82,
+      "patterns": [
+        "guia de envio",
+        "guía de envío",
+        "numero de guia",
+        "número de guía",
+        "me pasas la guia",
+        "me pasas la guía",
+        "tienen la guia",
+        "tienen la guía",
+        "cual es la guia",
+        "cuál es la guía"
+      ],
+      "responses": [
+        "Voy a validar si ya tenemos la guía de envío para darte la información exacta.",
+        "Claro, la guía registrada es {guia}."
+      ],
+      "response_rules": "guia_historial"
+    },
+    {
+      "name": "factura_electronica",
+      "priority": 80,
+      "patterns": [
+        "factura electronica",
+        "factura electrónica",
+        "emitieron la factura",
+        "necesito la factura",
+        "factura para contabilidad",
+        "numero de factura",
+        "número de factura"
+      ],
+      "responses": [
+        "Voy a validar si la factura electrónica ya fue emitida para darte respuesta.",
+        "Claro, revisamos la factura electrónica y te la compartimos para contabilidad."
+      ]
+    },
+    {
+      "name": "flete_envio",
+      "priority": 78,
+      "patterns": [
+        "flete esta incluido",
+        "flete está incluido",
+        "el flete",
+        "cuanto cuesta el envio",
+        "cuánto cuesta el envío",
+        "costo de envio",
+        "costo de envío",
+        "valor del flete",
+        "incluye flete",
+        "envio a medellin",
+        "envío a medellín",
+        "costo de transporte"
+      ],
+      "responses": [
+        "Incluimos un valor referencial de flete, pero puede variar según peso, destino, seguro y otros factores.",
+        "Vamos a validar el envío. El valor puede variar según peso, tamaño y destino final."
+      ]
+    },
+    {
+      "name": "ficha_manual_catalogo",
+      "priority": 76,
+      "patterns": [
+        "ficha tecnica",
+        "ficha técnica",
+        "manual de uso",
+        "manual del equipo",
+        "envia el catalogo",
+        "envíame el catálogo",
+        "enviame el catalogo",
+        "necesito el catalogo",
+        "necesito el catálogo",
+        "necesito el manual",
+        "catalogo de productos",
+        "catálogo de productos"
+      ],
+      "responses": [
+        "Con gusto reviso si podemos enviarte la ficha técnica. Si tienes una duda puntual, cuéntame para ayudarte mejor.",
+        "Claro, reviso el manual y catálogo para enviártelos. Si tienes una duda puntual, cuéntame para ayudarte mejor."
+      ]
+    },
+    {
+      "name": "compra_proforma",
+      "priority": 74,
+      "patterns": [
+        "confirmo la compra",
+        "enviame la proforma",
+        "envíame la proforma",
+        "voy a comprar",
+        "quiero comprar",
+        "avanzar a proforma",
+        "hacer la proforma",
+        "generar proforma"
+      ],
+      "responses": [
+        "Claro, avanzamos con la proforma. ¿Me confirmas el NIT o RUT para continuar?",
+        "Perfecto, avanzamos con la compra. ¿Me confirmas el NIT o RUT para la proforma?"
+      ]
+    },
+    {
+      "name": "orden_directa",
+      "priority": 72,
+      "patterns": [
+        "quiero ordenar",
+        "hazme el pedido",
+        "hacer el pedido",
+        "ordenar el",
+        "pedido del equipo",
+        "pedido de la cotizacion",
+        "pedido de la cotización",
+        "quiero el pedido",
+        "realizar el pedido"
+      ],
+      "responses": [
+        "Perfecto, avanzamos con el pedido. ¿Me confirmas el NIT o RUT?",
+        "Claro, avanzamos con el pedido. En un momento validamos la proforma."
+      ]
+    },
+    {
+      "name": "adjunto_multimedia",
+      "priority": 70,
+      "patterns": [
+        "adjunto una foto",
+        "adjunto foto",
+        "te envio una foto",
+        "te envío una foto",
+        "te mando una imagen",
+        "te envio un audio",
+        "te envío un audio",
+        "adjunto un audio",
+        "envio un audio",
+        "envío un audio",
+        "foto del equipo",
+        "audio con la referencia"
+      ],
+      "responses": [
+        "Gracias por enviarla, la reviso ahora mismo.",
+        "Recibido, ya estoy revisando el audio con la referencia y la cantidad."
+      ],
+      "response_rules": "foto_vs_audio"
+    },
+    {
+      "name": "agradecimiento",
+      "priority": 60,
+      "patterns": [
+        "^gracias$",
+        "^muchas gracias$",
+        "^mil gracias$",
+        "^gracias,? muy amable$",
+        "^muchas gracias,? muy amable$",
+        "^ok gracias$",
+        "^listo gracias$",
+        "^perfecto gracias$"
+      ],
+      "pattern_mode": "regex",
+      "responses": [
+        "Con mucho gusto, que tengas un excelente día."
+      ]
+    },
+    {
+      "name": "tono_consulta_general",
+      "priority": 40,
+      "patterns": [
+        "venden equipos",
+        "ustedes venden",
+        "manejan productos",
+        "informacion sobre los productos",
+        "información sobre los productos",
+        "que productos manejan",
+        "qué productos manejan",
+        "que venden",
+        "qué venden",
+        "catalogo general",
+        "qué equipos tienen",
+        "que equipos tienen"
+      ],
+      "responses": [
+        "Con gusto te ayudamos. ¿Qué producto, código, referencia o necesidad necesitas revisar?",
+        "Claro, cuéntame qué producto, código o referencia y qué información necesitas y lo revisamos para ayudarte."
+      ]
+    },
+    {
+      "name": "producto_sin_identificador",
+      "priority": 35,
+      "patterns": [
+        "necesito un medidor",
+        "necesito una bomba",
+        "busco un medidor",
+        "busco una bomba",
+        "estoy buscando una bomba",
+        "estoy buscando un medidor",
+        "necesito un sensor",
+        "busco un sensor",
+        "necesito un controlador",
+        "busco un controlador",
+        "necesito una valvula",
+        "necesito una válvula"
+      ],
+      "responses": [
+        "Con gusto. ¿Tienes referencia, marca o código Viaindustrial del equipo?",
+        "Claro. ¿Tienes referencia, marca o código Viaindustrial?"
+      ]
+    }
+  ]
+}

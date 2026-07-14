@@ -23,7 +23,8 @@ from openai_client import call_llm_json
 logger = logging.getLogger("nia.product_matcher")
 
 
-MAX_CANDIDATOS = 5
+# Solo el candidato mejor puntuado (ordenar/scoring ocurre antes en buscar_en_catalogo).
+MAX_CANDIDATOS = 1
 
 
 def _compactar_producto(producto: dict, index: int) -> dict:

@@ -39,7 +39,9 @@ from motor.motor_asyncio import AsyncIOMotorClient
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 
-load_dotenv(dotenv_path=ENV_PATH)
+# override=True: el .env del proyecto manda sobre OPENAI_API_KEY
+# u otras vars ya definidas en el entorno de Windows/usuario.
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 
 # ============================================================
