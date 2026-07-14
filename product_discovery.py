@@ -53,6 +53,9 @@ ETIQUETAS_CAMPO = {
     "alimentacion": "alimentación eléctrica",
     "resolucion": "resolución",
     "recalibrable": "recalibración",
+    "potencia": "potencia",
+    "voltaje": "voltaje",
+    "termostato": "opción de termostato",
 }
 
 EXTRACTORES_ATRIBUTOS: list[tuple[str, re.Pattern]] = [
@@ -123,6 +126,18 @@ EXTRACTORES_ATRIBUTOS: list[tuple[str, re.Pattern]] = [
         "alimentacion",
         re.compile(r"\b(24\s*VDC?|110\s*V|220\s*V|12\s*V)\b", re.IGNORECASE),
     ),
+    (
+        "potencia",
+        re.compile(r"\b(\d+)\s*W\b", re.IGNORECASE),
+    ),
+    (
+        "voltaje",
+        re.compile(r"\b(\d+)\s*V(?:AC|DC)?\b", re.IGNORECASE),
+    ),
+    (
+        "termostato",
+        re.compile(r"\b(sin\s+termostato|con\s+termostato)\b", re.IGNORECASE),
+    ),
 ]
 
 
@@ -163,6 +178,18 @@ def _limpiar_valor_extraido(campo: str, match: re.Match) -> str:
         if match.re.pattern.find("stem") >= 0 and match.lastindex == 1:
             return match.group(1).strip()
         return f"{match.group(1)} in"
+
+    if campo == "potencia" and match.lastindex:
+        return f"{match.group(1)} W"
+
+    if campo == "voltaje" and match.lastindex:
+        return f"{match.group(1)} V"
+
+    if campo == "termostato" and match.lastindex:
+        raw = _normalizar_texto(match.group(1))
+        if "sin" in raw:
+            return "Sin termostato"
+        return "Con termostato"
 
     valor = match.group(1) if match.lastindex else match.group(0)
     return re.sub(r"\s+", " ", str(valor).strip())
@@ -210,7 +237,144 @@ def extraer_atributos_descripcion_larga(texto: str) -> dict[str, str]:
         if match:
             atributos[campo] = _limpiar_valor_extraido(campo, match)
 
+    # En fichas de producto: si hay potencia y no se menciona termostato,
+    # contrastar con las variantes que sí dicen "sin termostato".
+    # No aplicar a respuestas cortas del cliente (ej. solo "60 W").
+    texto_l = texto_str.lower()
+    es_ficha = len(texto_str) >= 40 or any(
+        k in texto_l for k in ("calentador", "gabinete", "heater", "caja")
+    )
+    if (
+        es_ficha
+        and "potencia" in atributos
+        and "termostato" not in atributos
+        and "sin termostato" not in texto_l
+        and "termostato" not in texto_l
+    ):
+        atributos["termostato"] = "Con termostato"
+
     return atributos
+
+
+def hay_familia_ambigua_por_dl(
+    candidatos: list[dict],
+    tolerancia_score: float = 0.05,
+) -> tuple[bool, list[dict], list[dict]]:
+    """
+    Detecta familia de variantes con score similar que se diferencian en DL.
+
+    Retorna: (es_ambigua, grupo, preguntas_desde_dl)
+    """
+    if not candidatos or len(candidatos) < 2:
+        return False, [], []
+
+    ordenados = sorted(
+        candidatos,
+        key=lambda p: float(p.get("_score") or 0.0),
+        reverse=True,
+    )
+    top_score = float(ordenados[0].get("_score") or 0.0)
+    grupo = [
+        p
+        for p in ordenados
+        if abs(float(p.get("_score") or 0.0) - top_score) <= tolerancia_score
+    ]
+    if len(grupo) < 2:
+        return False, [], []
+
+    nombres = {
+        str(p.get("descripcion_corta") or p.get("nombre") or "").strip().lower()
+        for p in grupo
+    }
+    mismas_corta = len([n for n in nombres if n]) == 1
+
+    dls = [str(p.get("descripcion_larga") or "").strip() for p in grupo]
+    dls = [d for d in dls if d]
+    if len(dls) < 2:
+        return False, [], []
+
+    campos = analizar_campos_discriminantes(dls, top_n=3)
+    if not campos:
+        return False, [], []
+
+    # Solo preguntar si comparten nombre corto o hay discriminantes claros en DL.
+    if not mismas_corta and len(grupo) < 3:
+        return False, [], []
+
+    preguntas = generar_preguntas_desde_campos(campos)
+    # Quitar preguntas genéricas de fallback si no aportan opciones útiles.
+    perguntas_utiles = []
+    for preg in preguntas:
+        opts = [
+            o
+            for o in (preg.get("opciones") or [])
+            if str(o.get("valor") or "").lower() not in {"otro", ""}
+        ]
+        if opts:
+            perguntas_utiles.append(preg)
+    if not perguntas_utiles:
+        return False, [], []
+
+    return True, grupo, perguntas_utiles[:2]
+
+
+def filtrar_candidatos_por_respuestas_dl(
+    candidatos: list[dict],
+    respuestas: list[str],
+) -> list[dict]:
+    """
+    Reduce variantes de una familia usando respuestas técnicas (potencia, V, etc.).
+    Coincide contra atributos extraídos de DESCRIPCION_LARGA o texto libre en DL.
+    """
+    if not candidatos:
+        return []
+
+    respuestas_utiles = [
+        re.sub(r"\s+", " ", str(r or "").strip())
+        for r in (respuestas or [])
+        if str(r or "").strip()
+    ]
+    if not respuestas_utiles:
+        return list(candidatos)
+
+    attrs_cliente: dict[str, str] = {}
+    for resp in respuestas_utiles:
+        attrs_cliente.update(extraer_atributos_descripcion_larga(resp))
+
+    filtrados = list(candidatos)
+    for campo, valor_cliente in attrs_cliente.items():
+        valor_norm = _normalizar_texto(valor_cliente)
+        if not valor_norm:
+            continue
+        siguiente = []
+        for prod in filtrados:
+            dl = str(prod.get("descripcion_larga") or "")
+            attrs_prod = extraer_atributos_descripcion_larga(dl)
+            valor_prod = attrs_prod.get(campo) or attrs_prod.get(_campo_canonico(campo))
+            if valor_prod and _normalizar_texto(valor_prod) == valor_norm:
+                siguiente.append(prod)
+                continue
+            if valor_norm in _normalizar_texto(dl):
+                siguiente.append(prod)
+        if siguiente:
+            filtrados = siguiente
+
+    # Respuestas que no mapearon a campo (texto libre): deben aparecer en DL.
+    for resp in respuestas_utiles:
+        if extraer_atributos_descripcion_larga(resp):
+            continue
+        resp_norm = _normalizar_texto(resp)
+        if not resp_norm or resp_norm in {"otro", "no se", "no sé"}:
+            continue
+        siguiente = [
+            p
+            for p in filtrados
+            if resp_norm in _normalizar_texto(str(p.get("descripcion_larga") or ""))
+        ]
+        if siguiente:
+            filtrados = siguiente
+
+    return filtrados
 
 
 def _formatear_nivel_1(valor: str) -> str:
@@ -1143,7 +1307,15 @@ def _opciones_pregunta(pregunta) -> list[dict]:
 
 
 def _articulo_campo(campo: str) -> str:
-    if campo == "longitud_vastago":
+    if campo in {
+        "longitud_vastago",
+        "potencia",
+        "proteccion",
+        "resolucion",
+        "serie_modelo",
+        "senal_salida",
+        "termostato",
+    }:
         return "la"
     return "el"
 

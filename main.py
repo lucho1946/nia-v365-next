@@ -78,6 +78,7 @@ from catalog import (
     buscar_con_descubrimiento_producto,
     buscar_productos_por_nivel_1,
     evaluar_coincidencia,
+    score_producto,
     extraer_campos_tecnicos,
     formatear_producto,
     normalizar_referencia,
@@ -122,6 +123,9 @@ from product_discovery import (
     generar_preguntas_tecnicas_por_nivel_1,
     resolver_seleccion_tipo,
     construir_query_busqueda_final,
+    hay_familia_ambigua_por_dl,
+    filtrar_candidatos_por_respuestas_dl,
+    extraer_atributos_descripcion_larga,
     _texto_pregunta,
     _opciones_pregunta,
 )
@@ -813,6 +817,116 @@ def _parece_mensaje_solo_cantidad(texto: str) -> bool:
     return bool(CANTIDAD_MENSAJE_SOLO_RE.match(str(texto).strip()))
 
 
+def _es_mensaje_accion_ui(texto: str) -> bool:
+    """
+    Acciones de botones/chips: nunca son código ni referencia.
+
+    Ej.: el front envía valor 'agregar_otro' / 'cotizar' al pulsar
+    'Agregar otro producto' / 'Cotizar con esto'.
+    """
+    raw = str(texto or "").strip().lower().replace(" ", "_").replace("-", "_")
+    t = _normalizar_intencion(texto)
+
+    acciones = {
+        "agregar_otro",
+        "cotizar",
+        "cotizar_con_esto",
+        "con_esto",
+        "si",
+        "sí",
+        "no",
+        "dale",
+        "ok",
+        "agregar otro producto",
+        "cotizar con esto",
+        "otro",
+    }
+    if raw in acciones or t in acciones:
+        return True
+
+    # Variantes con guión bajo que matchean REFERENCIA_SEGMENTADA_RE.
+    if re.fullmatch(r"[a-z_]+", raw) and any(
+        raw.startswith(p) for p in ("agregar_", "cotizar_", "confirmar_")
+    ):
+        return True
+
+    return False
+
+
+def _parece_medida_fraccion_o_calibre(valor: str, contexto: str = "") -> bool:
+    """
+    True si el valor parece una medida/calibre, no una referencia de catálogo.
+
+    Ejemplos a rechazar como referencia:
+    - 3-16 / 3/16 (destornillador de 3-16 pulgadas)
+    - 1/2 (junto a NPT o solo)
+    - 3/4"
+
+    No rechaza referencias reales con letras: PT-7320, 68072-XC3.
+    """
+    v = str(valor or "").strip()
+    if not v:
+        return False
+
+    # Solo dígitos y separadores: 3-16, 3/16, 1.2-3.4
+    if not re.fullmatch(r"\d{1,4}(?:[-._/]\d{1,4})+", v):
+        return False
+
+    partes = re.split(r"[-._/]", v)
+    if not partes or not all(p.isdigit() for p in partes):
+        return False
+
+    # Fracciones/calibres cortos (cada segmento pequeño).
+    if any(len(p) > 3 for p in partes):
+        return False
+
+    ctx = str(contexto or "").lower()
+    if re.search(
+        r"pulg|inch|\bin\b|mm\b|cm\b|npt|bsp|\"|''|destornill|llave|broca|hex",
+        ctx,
+    ):
+        return True
+
+    # Sin unidad explícita: patrón corto numérico-numérico típico de fracciones.
+    if len(partes) <= 3 and sum(len(p) for p in partes) <= 6:
+        return True
+
+    return False
+
+
+def _parece_solicitud_en_lenguaje_natural(texto: str) -> bool:
+    """
+    Evita tratar frases como 'destornillador de 3-16 pulgadas' como referencia.
+    """
+    t = _normalizar_intencion(texto)
+    palabras = [p for p in t.split() if p]
+    if len(palabras) < 2:
+        return False
+
+    conectores = {
+        "de", "del", "la", "el", "los", "las", "un", "una",
+        "para", "con", "por", "en", "y", "o",
+    }
+    if len(palabras) >= 3 and any(p in conectores for p in palabras):
+        return True
+
+    if re.search(r"\b(pulg|inch|\bin\b|mm\b|cm\b|npt|bsp)\b", t):
+        return True
+
+    return False
+
+
+def _parece_conexion_mecanica_compacta(texto: str) -> bool:
+    """Ej.: 1/2 NPT, 3/4 BSP — no son referencias de producto."""
+    t = str(texto or "").strip()
+    return bool(
+        re.fullmatch(
+            r"\d{1,2}\s*[/.\-]\s*\d{1,2}\s*[A-Za-z]{2,12}",
+            t,
+        )
+    )
+
+
 def detectar_identificador(texto: str):
     """
     Detecta un identificador explícito dentro de un mensaje natural.
@@ -832,6 +946,10 @@ def detectar_identificador(texto: str):
 
     # "2 und" / "2 unidades" es cantidad, no referencia (p.ej. REFERENCIA_ESPACIOS_RE).
     if _parece_mensaje_solo_cantidad(texto):
+        return None, None
+
+    # Botones de carrito/confirmación: no son referencias (ej. agregar_otro).
+    if _es_mensaje_accion_ui(texto):
         return None, None
 
     # Un correo nunca es código/referencia. "afvr1975@gmail.com" no debe
@@ -869,6 +987,7 @@ def detectar_identificador(texto: str):
         if (
             len(referencia) >= 3
             and not _parece_dominio_o_email(referencia)
+            and not _parece_medida_fraccion_o_calibre(referencia, texto_sin_email)
             and not re.fullmatch(
                 r"(?:del?\s+)?(?:producto|catalogo|exact[oa]|adicional|por\s+favor)?",
                 referencia,
@@ -924,13 +1043,21 @@ def detectar_identificador(texto: str):
     match_seg = REFERENCIA_SEGMENTADA_RE.search(texto_sin_email)
     if match_seg:
         referencia = _ref_limpia(match_seg.group(1))
-        if not _parece_dominio_o_email(referencia):
+        if (
+            not _parece_dominio_o_email(referencia)
+            and not _parece_medida_fraccion_o_calibre(referencia, texto_sin_email)
+        ):
             logger.debug("Referencia segmentada detectada: %s", referencia)
             return "referencia", referencia
 
     if REFERENCIA_ESPACIOS_RE.match(texto_sin_email.strip()):
         referencia = _ref_limpia(texto_sin_email)
-        if not _parece_dominio_o_email(referencia):
+        if (
+            not _parece_dominio_o_email(referencia)
+            and not _parece_medida_fraccion_o_calibre(referencia, texto_sin_email)
+            and not _parece_solicitud_en_lenguaje_natural(texto_sin_email)
+            and not _parece_conexion_mecanica_compacta(texto_sin_email)
+        ):
             logger.debug("Referencia con espacios detectada: %s", referencia)
             return "referencia", referencia
 
@@ -946,6 +1073,10 @@ def detectar_identificador(texto: str):
         match_ref = REFERENCIA_ALFANUMERICA_COMPACTA_RE.search(texto_sin_email)
 
     if match_ref:
+        # No capturar códigos fantasmas dentro de frases naturales.
+        if _parece_solicitud_en_lenguaje_natural(texto_sin_email):
+            return None, None
+
         prefijo = match_ref.group(1).upper()
         cuerpo = match_ref.group(2).upper()
 
@@ -961,7 +1092,10 @@ def detectar_identificador(texto: str):
 
         if prefijo not in prefijos_bloqueados:
             referencia = f"{prefijo}{cuerpo}"
-            if not _parece_dominio_o_email(referencia):
+            if (
+                not _parece_dominio_o_email(referencia)
+                and not _parece_medida_fraccion_o_calibre(referencia, texto_sin_email)
+            ):
                 logger.debug(
                     "Referencia alfanumérica detectada: %s",
                     referencia,
@@ -1834,12 +1968,12 @@ async def buscar_en_catalogo(texto: str) -> dict:
     """
     Busca candidatos reales y valida compatibilidad producto/necesidad.
 
-    Flujo correcto:
-    1. Recibe mensaje natural del cliente.
-    2. Genera queries limpias para catálogo.
-    3. Busca candidatos reales en MongoDB.
-    4. Valida compatibilidad contra la necesidad original.
-    5. Retorna encontrado / relacionado / sin_resultado.
+    Flujo:
+    1. Genera queries y recupera candidatos de MongoDB.
+    2. Ordena por score_producto (determinístico).
+    3. Si evaluar_coincidencia confirma umbral → retorna ese producto (sin LLM).
+    4. Si el score no es claro → LLM (validar_compatibilidad_producto) como
+       respaldo, con candidatos ya ordenados (MAX_CANDIDATOS=1: el mejor).
     """
     logger.info("Búsqueda catálogo solicitada: '%s'", texto[:100])
 
@@ -1895,21 +2029,97 @@ async def buscar_en_catalogo(texto: str) -> dict:
             "candidatos_encontrados": False,
         }
 
+    # Orden determinístico: el mejor score primero (también para el LLM).
+    for prod in resultados:
+        prod["_score"] = score_producto(
+            prod,
+            texto,
+            campos_query=campos_query,
+        )
+    resultados = sorted(
+        resultados,
+        key=lambda p: float(p.get("_score") or 0.0),
+        reverse=True,
+    )
+
+    # Antes de aceptar un único producto (score o LLM): si hay variantes
+    # con el mismo nombre corto y distinta DESCRIPCION_LARGA, preguntar.
+    attrs_texto = extraer_atributos_descripcion_larga(texto or "")
+    tiene_spec_dl = bool(campos_query) or bool(attrs_texto)
+    pool_familia = resultados
+    if attrs_texto:
+        pool_filtrado = filtrar_candidatos_por_respuestas_dl(
+            resultados,
+            list(attrs_texto.values()),
+        )
+        if pool_filtrado:
+            pool_familia = pool_filtrado
+
+    if not tiene_spec_dl or len(pool_familia) > 1:
+        ambigua, grupo, preguntas_dl = hay_familia_ambigua_por_dl(pool_familia)
+        if ambigua and preguntas_dl and (not tiene_spec_dl or len(grupo) > 1):
+            logger.info(
+                "Familia ambigua por DL: %s variantes, pregunta='%s'",
+                len(grupo),
+                (preguntas_dl[0] or {}).get("texto"),
+            )
+            return {
+                "estado": "familia_ambigua",
+                "producto": None,
+                "candidatos": grupo,
+                "preguntas_tecnicas": preguntas_dl,
+                "exacto": False,
+                "razon": (
+                    "Hay varias alternativas del mismo tipo; "
+                    "hay que discriminar con datos de la ficha técnica."
+                ),
+                "query_catalogo": query_usada,
+                "candidatos_encontrados": True,
+                "texto_original": texto,
+            }
+
+    if len(pool_familia) == 1 and tiene_spec_dl:
+        prod_unico = pool_familia[0]
+        logger.info(
+            "Decisión por spec DL sobre familia: %s score=%s",
+            prod_unico.get("codigo"),
+            prod_unico.get("_score"),
+        )
+        return {
+            "estado": "encontrado",
+            "producto": prod_unico,
+            "tipo": "coincidencia_textual",
+            "exacto": True,
+            "razon": "Variante única según especificaciones de la ficha técnica.",
+            "query_catalogo": query_usada,
+            "candidatos_encontrados": True,
+        }
+
     ok_textual, prod_textual = evaluar_coincidencia(
-    resultados,
-    texto,
-    campos=len(campos_query) if campos_query else 1,
-    campos_query=campos_query,
+        resultados,
+        texto,
+        campos=len(campos_query) if campos_query else 1,
+        campos_query=campos_query,
     )
 
     if ok_textual and prod_textual:
         logger.info(
-            "Mejor candidato textual: %s score=%s query='%s'",
+            "Decisión por score textual (sin LLM): %s score=%s query='%s'",
             prod_textual.get("codigo"),
             prod_textual.get("_score"),
             query_usada,
         )
+        return {
+            "estado": "encontrado",
+            "producto": prod_textual,
+            "tipo": "coincidencia_textual",
+            "exacto": True,
+            "razon": "Coincidencia textual confiable por score determinístico.",
+            "query_catalogo": query_usada,
+            "candidatos_encontrados": True,
+        }
 
+    # Score no claro → IA como respaldo, solo el candidato más puntuado.
     decision = await validar_compatibilidad_producto(
         necesidad_cliente=texto,
         candidatos=resultados,
@@ -2387,6 +2597,24 @@ async def _iniciar_descubrimiento_producto_corta_larga(
 
     busqueda_textual = _tiene_busqueda_textual_multipalabra(mensaje)
 
+    # Si ya hay familia de variantes del mismo nombre corto (mismas DL distintas),
+    # preguntar por ficha técnica antes que por tipos NIVEL_1 genéricos.
+    if busqueda_textual:
+        res_familia = await buscar_en_catalogo(mensaje)
+        if res_familia.get("estado") == "familia_ambigua":
+            return construir_respuesta_desde_resultado(
+                res=res_familia,
+                cliente=cliente,
+                productos_acumulados=[],
+                desde="familia_dl_inicio",
+                necesidad_ctx_base={
+                    "texto_original": mensaje,
+                    "modo_busqueda": "producto",
+                    "palabra_clave": palabra,
+                    "query_evaluada": res_familia.get("query_catalogo") or mensaje,
+                },
+            )
+
     tipos = await resolver_tipos_catalogo_inicio(
         palabra_clave=palabra,
         mensaje=mensaje,
@@ -2794,7 +3022,94 @@ async def _continuar_descubrimiento_corta_larga(
             _continuar_secuencia_preguntas(necesidad_ctx, mensaje, cliente)
         )
 
-        if accion in {"continuar", "esperar_otro"}:
+        if accion == "esperar_otro":
+            return respuesta_segura, etapa_resp, ctx_actualizado
+
+        # Familia por DL: filtrar variantes ya candidatas (también a mitad de secuencia).
+        if (
+            ctx_actualizado
+            and ctx_actualizado.get("flujo_descubrimiento") == "familia_dl"
+            and accion in {"continuar", "buscar"}
+        ):
+            familia = list(ctx_actualizado.get("candidatos_familia") or [])
+            respuestas = list(ctx_actualizado.get("respuestas_tecnicas") or [])
+            filtrados = filtrar_candidatos_por_respuestas_dl(familia, respuestas)
+
+            if len(filtrados) == 1:
+                res = {
+                    "estado": "encontrado",
+                    "producto": filtrados[0],
+                    "razon": "Seleccionado según las especificaciones de la ficha técnica.",
+                    "exacto": True,
+                    "query_catalogo": ctx_actualizado.get("query_evaluada"),
+                }
+                ctx_base = _ctx_descubrimiento_base(
+                    ctx_actualizado,
+                    ctx_actualizado.get("query_evaluada") or "",
+                )
+                ctx_base["flujo_descubrimiento"] = "familia_dl"
+                ctx_base["opciones_actuales"] = []
+                ctx_base["candidatos_familia"] = []
+                return construir_respuesta_desde_resultado(
+                    res=res,
+                    cliente=cliente,
+                    productos_acumulados=productos_acumulados,
+                    desde="familia_dl",
+                    necesidad_ctx_base=ctx_base,
+                )
+
+            if len(filtrados) > 1:
+                ambigua, grupo, preguntas_dl = hay_familia_ambigua_por_dl(filtrados)
+                if ambigua and preguntas_dl:
+                    pregunta0 = _pregunta_como_dict(preguntas_dl[0])
+                    prefix = _nombre_cliente_prefix(cliente)
+                    return (
+                        _marcar_respuesta_segura(
+                            f"{prefix}quedan varias alternativas. "
+                            f"{_texto_pregunta(pregunta0)}"
+                        ),
+                        "descubrimiento",
+                        {
+                            **ctx_actualizado,
+                            "fase_descubrimiento": "preguntas_tecnicas",
+                            "flujo_descubrimiento": "familia_dl",
+                            "preguntas_pendientes": preguntas_dl,
+                            "pregunta_indice": 0,
+                            "candidatos_familia": grupo,
+                            "opciones_actuales": _opciones_pregunta(pregunta0),
+                        },
+                    )
+                if accion == "buscar":
+                    opciones = _opciones_candidatos_producto(filtrados)
+                    return (
+                        _marcar_respuesta_segura(
+                            _respuesta_multiples_candidatos(filtrados, cliente)
+                        ),
+                        "descubrimiento",
+                        {
+                            **ctx_actualizado,
+                            "fase_descubrimiento": "seleccion_producto_descubrimiento",
+                            "candidatos_producto": filtrados,
+                            "opciones_actuales": opciones,
+                        },
+                    )
+
+            if accion == "buscar":
+                query_familia = " ".join(
+                    [
+                        str(ctx_actualizado.get("texto_original") or "").strip(),
+                        *respuestas,
+                    ]
+                ).strip()
+                return await _buscar_y_responder_descubrimiento(
+                    query_e=query_familia,
+                    necesidad_ctx=ctx_actualizado,
+                    cliente=cliente,
+                    productos_acumulados=productos_acumulados,
+                    desde="familia_dl",
+                )
+
+        if accion == "continuar":
             return respuesta_segura, etapa_resp, ctx_actualizado
 
         nivel_1 = (
@@ -3886,6 +4201,51 @@ def construir_respuesta_desde_resultado(
                 ),
                 "candidatos_producto": candidatos,
                 "opciones_actuales": opciones,
+                "query_evaluada": res.get("query_catalogo")
+                or necesidad_ctx_base.get("query_evaluada"),
+            },
+        )
+
+    if estado == "familia_ambigua" and res.get("preguntas_tecnicas"):
+        preguntas = _normalizar_preguntas(res.get("preguntas_tecnicas") or [])
+        if not preguntas:
+            # Fallback seguro: mostrar candidatos si no hay pregunta útil.
+            candidatos = list(res.get("candidatos") or [])
+            if candidatos:
+                opciones = _opciones_candidatos_producto(candidatos)
+                return (
+                    _marcar_respuesta_segura(
+                        _respuesta_multiples_candidatos(candidatos, cliente)
+                    ),
+                    "descubrimiento",
+                    {
+                        **necesidad_ctx_base,
+                        "fase_descubrimiento": "seleccion_producto_descubrimiento",
+                        "candidatos_producto": candidatos,
+                        "opciones_actuales": opciones,
+                    },
+                )
+        pregunta0 = _pregunta_como_dict(preguntas[0])
+        opciones = _opciones_pregunta(pregunta0)
+        prefix = _nombre_cliente_prefix(cliente)
+        texto = (
+            f"{prefix}encontré varias alternativas de ese tipo. "
+            f"Para elegir la correcta: {_texto_pregunta(pregunta0)}"
+        )
+        return (
+            _marcar_respuesta_segura(texto),
+            "descubrimiento",
+            {
+                **necesidad_ctx_base,
+                "fase_descubrimiento": "preguntas_tecnicas",
+                "flujo_descubrimiento": "familia_dl",
+                "preguntas_pendientes": preguntas,
+                "pregunta_indice": 0,
+                "respuestas_tecnicas": [],
+                "candidatos_familia": list(res.get("candidatos") or []),
+                "opciones_actuales": opciones,
+                "texto_original": res.get("texto_original")
+                or necesidad_ctx_base.get("texto_original"),
                 "query_evaluada": res.get("query_catalogo")
                 or necesidad_ctx_base.get("query_evaluada"),
             },
@@ -5788,16 +6148,24 @@ async def procesar_turno(
     # ══════════════════════════════════════════════════════
     # Si el turno pertenece a una etapa comercial, se resuelve aquí
     # y se retorna inmediatamente. No catálogo. No LLM. No reglas posteriores.
-    # Excepciones: correo, cantidad ("2 und") o etapa esperando_cantidad
-    # no deben saltarse el controlador comercial por parecer "referencia".
+    # Excepciones: correo, cantidad ("2 und"), acciones de UI (agregar_otro)
+    # o etapa esperando_cantidad no deben saltarse el controlador comercial.
     tiene_email = bool(EMAIL_RE.search(mensaje or ""))
     es_cantidad_comercial = (
         etapa == "esperando_cantidad"
         or _parece_mensaje_solo_cantidad(mensaje)
     )
+    es_accion_carrito = _es_mensaje_accion_ui(mensaje) or (
+        etapa in {"confirmando_cierre", "producto_encontrado"}
+        and (
+            _es_pedido_agregar_producto(mensaje)
+            or _es_pedido_cotizar(mensaje)
+        )
+    )
     bloquear_por_identificador = bool(tipo_identificador) and not (
         (tiene_email and etapa in ESTADOS_COMERCIALES)
         or es_cantidad_comercial
+        or es_accion_carrito
     )
     if (
         mensaje.strip()

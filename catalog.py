@@ -100,10 +100,12 @@ def _tokens(text: str) -> list[str]:
     normalized = _normalize_text(text)
     raw_tokens = re.findall(r"[a-z0-9ñ]+", normalized)
 
+    # Tokens 100% numéricos pasan siempre (77, 99, 24).
+    # El mínimo de 3 caracteres aplica solo a tokens alfabéticos.
     return [
         token
         for token in raw_tokens
-        if len(token) >= 3
+        if token.isdigit() or len(token) >= 3
     ]
 
 
@@ -1024,6 +1026,64 @@ def _extraer_campos_query(texto: str) -> dict:
     t = t_original.lower()
 
     # ------------------------------------------------------------
+    # 0. Dimensiones (caja/gabinete, etc.)
+    # Ejemplos: 77 X 99 X 24 | 77x99x24mm | 60 x 80 x 20 cm
+    # Normalización: números ordenados ascendente unidos con "x"
+    # para que "77 X 99 X 24" y "24x77x99" generen el mismo valor.
+    # ------------------------------------------------------------
+    dims = re.search(
+        r"\b(\d+[\.,]?\d*)\s*[x×]\s*(\d+[\.,]?\d*)"
+        r"(?:\s*[x×]\s*(\d+[\.,]?\d*))?\s*(mm|cm)?\b",
+        t,
+        re.IGNORECASE,
+    )
+    if dims:
+        nums: list[float] = []
+        for g in dims.groups()[:3]:
+            if g is None:
+                continue
+            if str(g).lower() in {"mm", "cm"}:
+                continue
+            try:
+                nums.append(float(str(g).replace(",", ".")))
+            except ValueError:
+                continue
+        if len(nums) >= 2:
+            partes = []
+            for n in sorted(nums):
+                if float(n).is_integer():
+                    partes.append(str(int(n)))
+                else:
+                    partes.append(str(n).rstrip("0").rstrip("."))
+            campos["dimensiones"] = "x".join(partes)
+
+    # ------------------------------------------------------------
+    # 0b. Calibre fraccional en pulgadas
+    # Ejemplos: 3/16", 3-16 pulgadas, 1/2 inch
+    # No debe interpretarse como rango "3 a 16".
+    # ------------------------------------------------------------
+    calibre = re.search(
+        r"\b(\d{1,2})\s*[/\-]\s*(\d{1,2})\s*"
+        r"(?:pulgadas?|pulg\.?|inch(?:es)?|in\.?|\")",
+        t,
+        re.IGNORECASE,
+    )
+    if calibre:
+        a_raw, b_raw = calibre.groups()
+        try:
+            a_i, b_i = int(float(a_raw.replace(",", "."))), int(
+                float(b_raw.replace(",", "."))
+            )
+        except ValueError:
+            a_i, b_i = None, None
+        if (
+            a_i is not None
+            and b_i in {2, 4, 8, 16, 32, 64}
+            and 0 < a_i < b_i
+        ):
+            campos["calibre"] = f"{a_i}/{b_i} in"
+
+    # ------------------------------------------------------------
     # 1. Rangos numéricos con unidades técnicas
     # Ejemplos:
     # - 0 a 10 bar
@@ -1038,9 +1098,22 @@ def _extraer_campos_query(texto: str) -> dict:
         re.IGNORECASE,
     )
 
-    if rango:
+    if rango and "calibre" not in campos:
         inicio, fin, unidad = rango.groups()
-        campos["rango"] = f"{inicio} a {fin} {unidad}"
+        unidad_l = (unidad or "").lower()
+        # Evita 3-16 pulgadas → falso rango "3 a 16".
+        es_fraccion_pulgada = False
+        if re.search(r"pulg|inch|^in$", unidad_l):
+            try:
+                a_f = float(str(inicio).replace(",", "."))
+                b_f = float(str(fin).replace(",", "."))
+                if b_f in {2, 4, 8, 16, 32, 64} and 0 < a_f < b_f:
+                    es_fraccion_pulgada = True
+                    campos["calibre"] = f"{int(a_f)}/{int(b_f)} in"
+            except ValueError:
+                pass
+        if not es_fraccion_pulgada:
+            campos["rango"] = f"{inicio} a {fin} {unidad}"
 
     # Valor único con unidad cuando no hay rango.
     # Ejemplo: 80 C, 24 VDC, 50 l/min, 10 bar.
@@ -1099,7 +1172,7 @@ def _extraer_campos_query(texto: str) -> dict:
     # - conexión bridada
     # ------------------------------------------------------------
     conexion_medida = re.search(
-        r"\b(\d+/\d+|\d+\.\d+|\d+)\s*(?:\"|''|pulg|pulgada|pulgadas)?\s*"
+        r"\b(\d+/\d+|\d+\.\d+|\d+)\s*(?:\"|''|pulgadas|pulgada|pulg|inch|inches|in)?\s*"
         r"([a-zA-Z]{2,10})\b",
         t,
         re.IGNORECASE,
@@ -1112,6 +1185,7 @@ def _extraer_campos_query(texto: str) -> dict:
         if "/" in medida and tipo.lower() not in {
             "v", "vac", "vdc", "ma", "a", "hz", "bar", "psi",
             "pulg", "pulgada", "pulgadas", "inch", "inches", "in",
+            "adas",  # resto de "pulg"+"adas" si el regex corta mal
         }:
             campos["conexion"] = f"{medida} {tipo}"
 
@@ -1177,6 +1251,10 @@ def _extraer_campos_query(texto: str) -> dict:
     if voltaje:
         valor, unidad = voltaje.groups()
         campos["voltaje"] = f"{valor} {unidad.upper()}"
+
+    potencia = re.search(r"\b(\d+)\s*w\b", t, re.IGNORECASE)
+    if potencia:
+        campos["potencia"] = f"{potencia.group(1)} W"
 
     alimentacion = re.search(
         r"\b(?:alimentacion|alimentación)\s+([a-zA-Z0-9\-\s/\.]+)",
@@ -1321,7 +1399,7 @@ def _penalizacion_por_incompatibilidad(prod: dict, query: str) -> float:
 
     return 1.0
 
-def _score_producto(
+def score_producto(
     prod: dict,
     query: str,
     campos_query: Optional[dict] = None,
@@ -1333,6 +1411,7 @@ def _score_producto(
     de forma opcional, scoring por campos técnicos estructurados.
 
     Si no hay campos_query, el comportamiento sigue siendo el mismo.
+    API pública usada por buscar_en_catalogo para ordenar candidatos.
     """
     query_tokens = _tokens(query)
 
@@ -1393,6 +1472,19 @@ def _score_producto(
     if campos_query:
         descripcion_larga = _clean_text(prod.get("descripcion_larga"))
         campos_producto = _parsear_campos(descripcion_larga)
+        # Dimensiones también desde texto libre (sin separador ¦).
+        if campos_query.get("dimensiones"):
+            dims_prod = _extraer_campos_query(
+                " ".join(
+                    [
+                        _clean_text(prod.get("descripcion_corta")),
+                        descripcion_larga,
+                        _clean_text(prod.get("nombre")),
+                    ]
+                )
+            ).get("dimensiones")
+            if dims_prod:
+                campos_producto["dimensiones"] = dims_prod
         score_campos = _score_campos_estructurados(campos_producto, campos_query)
 
     if campos_query and score_campos > 0:
@@ -1406,6 +1498,10 @@ def _score_producto(
         score *= 0.90
 
     return round(score, 4)
+
+
+# Alias interno de compatibilidad.
+_score_producto = score_producto
 
 
 def evaluar_coincidencia(
