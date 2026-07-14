@@ -125,6 +125,7 @@ from product_discovery import (
     construir_query_busqueda_final,
     hay_familia_ambigua_por_dl,
     filtrar_candidatos_por_respuestas_dl,
+    filtrar_preguntas_familia_no_respondidas,
     extraer_atributos_descripcion_larga,
     _texto_pregunta,
     _opciones_pregunta,
@@ -3107,7 +3108,11 @@ async def _continuar_descubrimiento_corta_larga(
 
             if len(filtrados) > 1:
                 ambigua, grupo, preguntas_dl = hay_familia_ambigua_por_dl(filtrados)
-                if ambigua and preguntas_dl:
+                preguntas_dl = filtrar_preguntas_familia_no_respondidas(
+                    preguntas_dl if ambigua else [],
+                    respuestas,
+                )
+                if preguntas_dl:
                     pregunta0 = _pregunta_como_dict(preguntas_dl[0])
                     texto_prod = (
                         ctx_actualizado.get("texto_original")
@@ -3125,24 +3130,25 @@ async def _continuar_descubrimiento_corta_larga(
                             "flujo_descubrimiento": "familia_dl",
                             "preguntas_pendientes": preguntas_dl,
                             "pregunta_indice": 0,
-                            "candidatos_familia": grupo,
+                            "candidatos_familia": grupo or filtrados,
                             "opciones_actuales": _opciones_pregunta(pregunta0),
                         },
                     )
-                if accion == "buscar":
-                    opciones = _opciones_candidatos_producto(filtrados)
-                    return (
-                        _marcar_respuesta_segura(
-                            _respuesta_multiples_candidatos(filtrados, cliente)
-                        ),
-                        "descubrimiento",
-                        {
-                            **ctx_actualizado,
-                            "fase_descubrimiento": "seleccion_producto_descubrimiento",
-                            "candidatos_producto": filtrados,
-                            "opciones_actuales": opciones,
-                        },
-                    )
+                # Sin pregunta nueva útil: listar variantes restantes.
+                opciones = _opciones_candidatos_producto(filtrados)
+                return (
+                    _marcar_respuesta_segura(
+                        _respuesta_multiples_candidatos(filtrados, cliente)
+                    ),
+                    "descubrimiento",
+                    {
+                        **ctx_actualizado,
+                        "fase_descubrimiento": "seleccion_producto_descubrimiento",
+                        "candidatos_producto": filtrados,
+                        "opciones_actuales": opciones,
+                        "candidatos_familia": filtrados,
+                    },
+                )
 
             if accion == "buscar":
                 query_familia = " ".join(
