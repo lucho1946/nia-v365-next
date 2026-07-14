@@ -85,6 +85,10 @@ KEYWORDS_TO_CATEGORIA = {
     "dieléctrico": "calzado-dielectrico",
     "dielectrica": "calzado-dielectrico",
     "dieléctrica": "calzado-dielectrico",
+    # Calentamiento / gabinetes
+    "calentador": "calentadores-flexibles",
+    "calentadores": "calentadores-flexibles",
+    "heater": "calentadores-flexibles",
 }
 
 # ─── Campos técnicos por categoría ────────────────────────────────────────────
