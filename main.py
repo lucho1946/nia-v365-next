@@ -83,7 +83,7 @@ from catalog import (
     normalizar_referencia,
 )
 from product_matcher import validar_compatibilidad_producto
-from file_processor import procesar_archivo
+from file_processor import procesar_archivo, extraer_datos_rut_pdf
 from knowledge import contexto_para_agente
 from questions_agent import generar_preguntas, detectar_escenario
 from product_fields import detectar_categoria, KEYWORDS_TO_CATEGORIA
@@ -340,6 +340,15 @@ EMAIL_RE = re.compile(
 )
 
 NIT_RE = re.compile(r"\b(\d{8,10}-?\d?)\b")
+
+# Cantidad comercial pura: "2", "2 und", "2 unidades,", "10 u."
+# No debe interpretarse como referencia de catálogo.
+CANTIDAD_MENSAJE_SOLO_RE = re.compile(
+    r"^\s*(\d{1,5})\s*"
+    r"(?:und|unds|uds?|unidad(?:es)?|pieza(?:s)?|u\.?)?"
+    r"\s*[,.]?\s*$",
+    re.IGNORECASE,
+)
 
 # ============================================================
 # CLASIFICADOR DE INTENCIÓN — COTIZACIÓN V
@@ -797,6 +806,13 @@ def _parece_nombre_producto_modelo(texto: str) -> bool:
     return bool(re.search(r"[a-zA-Z]", t) and re.search(r"\d", t))
 
 
+def _parece_mensaje_solo_cantidad(texto: str) -> bool:
+    """True si el mensaje completo es solo una cantidad comercial."""
+    if not texto:
+        return False
+    return bool(CANTIDAD_MENSAJE_SOLO_RE.match(str(texto).strip()))
+
+
 def detectar_identificador(texto: str):
     """
     Detecta un identificador explícito dentro de un mensaje natural.
@@ -812,6 +828,10 @@ def detectar_identificador(texto: str):
     texto = str(texto).strip()
 
     if not texto:
+        return None, None
+
+    # "2 und" / "2 unidades" es cantidad, no referencia (p.ej. REFERENCIA_ESPACIOS_RE).
+    if _parece_mensaje_solo_cantidad(texto):
         return None, None
 
     # Un correo nunca es código/referencia. "afvr1975@gmail.com" no debe
@@ -4039,6 +4059,8 @@ def _extraer_cantidad_solicitada(texto: str) -> Optional[int]:
 
     Regla:
     - Acepta cantidades razonables de 1 a 5 dígitos.
+    - Acepta sufijos: und, unds, uds, unidades, piezas, u.
+    - Acepta puntuación final: "2,", "2 und.", "2 unidades,".
     - No interpreta números largos como cantidad para evitar confundir NIT,
       teléfonos o códigos.
     """
@@ -4046,9 +4068,18 @@ def _extraer_cantidad_solicitada(texto: str) -> Optional[int]:
         return None
 
     t = texto.lower().strip()
+    t = re.sub(r"[.,;:\s]+$", "", t)
+
+    m_solo = CANTIDAD_MENSAJE_SOLO_RE.match(t)
+    if m_solo:
+        try:
+            cantidad = int(m_solo.group(1))
+        except ValueError:
+            return None
+        return cantidad if cantidad > 0 else None
 
     m = re.search(
-        r"\b(\d{1,5})\b\s*(und|unds|unidad|unidades|pieza|piezas|u)?\b",
+        r"(?<!\d)(\d{1,5})\s*(?:und|unds|uds?|unidad(?:es)?|pieza(?:s)?|u\.?)?(?!\d)",
         t,
         re.IGNORECASE,
     )
@@ -4462,10 +4493,8 @@ def _respuesta_siguiente_dato_comercial(
         # Punto final de la etapa de cotización.
         # No pedimos empresa, NIT ni RUT aquí.
         return (
-            "Perfecto. Registré tu solicitud con los productos y "
-            "cantidades indicados. La cotización aún no ha sido "
-            "emitida ni enviada. Un asesor debe validarla y "
-            "continuar el proceso.",
+            "Registré tu solicitud con los productos y cantidades "
+            "indicados. La cotización llegará lo más pronto posible.",
             "cotizacion_lista",
         )
 
@@ -5759,10 +5788,16 @@ async def procesar_turno(
     # ══════════════════════════════════════════════════════
     # Si el turno pertenece a una etapa comercial, se resuelve aquí
     # y se retorna inmediatamente. No catálogo. No LLM. No reglas posteriores.
-    # Excepción: un correo no cuenta como identificador de producto.
+    # Excepciones: correo, cantidad ("2 und") o etapa esperando_cantidad
+    # no deben saltarse el controlador comercial por parecer "referencia".
     tiene_email = bool(EMAIL_RE.search(mensaje or ""))
+    es_cantidad_comercial = (
+        etapa == "esperando_cantidad"
+        or _parece_mensaje_solo_cantidad(mensaje)
+    )
     bloquear_por_identificador = bool(tipo_identificador) and not (
-        tiene_email and etapa in ESTADOS_COMERCIALES
+        (tiene_email and etapa in ESTADOS_COMERCIALES)
+        or es_cantidad_comercial
     )
     if (
         mensaje.strip()
@@ -5825,6 +5860,101 @@ async def procesar_turno(
 
     if archivo_bytes and archivo_nombre:
         logger.info("Procesando archivo: %s", archivo_nombre)
+
+        # ------------------------------------------------------------
+        # RUT (PDF DIAN): tomar NIT+DV y razón social, sin catálogo.
+        # ------------------------------------------------------------
+        nombre_archivo_l = str(archivo_nombre or "").lower()
+        if nombre_archivo_l.endswith(".pdf"):
+            datos_rut = extraer_datos_rut_pdf(archivo_bytes, archivo_nombre)
+        else:
+            datos_rut = None
+
+        if datos_rut and datos_rut.get("es_rut"):
+            if datos_rut.get("nit"):
+                cliente["nit"] = datos_rut["nit"]
+            if datos_rut.get("empresa"):
+                cliente["empresa"] = datos_rut["empresa"]
+            cliente["rut"] = "recibido"
+
+            datos_leidos = []
+            if cliente.get("empresa"):
+                datos_leidos.append(f"razón social {cliente['empresa']}")
+            if cliente.get("nit"):
+                datos_leidos.append(f"NIT {cliente['nit']}")
+
+            if datos_leidos:
+                confirmacion_rut = (
+                    "Recibí el RUT y tomé "
+                    + " y ".join(datos_leidos)
+                    + "."
+                )
+            else:
+                confirmacion_rut = (
+                    "Recibí el RUT, pero no pude leer con claridad el NIT "
+                    "y la razón social. ¿Me los confirmas por texto?"
+                )
+
+            etapas_fiscales = {
+                "proforma",
+                "calificacion",
+                "cotizacion_lista",
+                "cotizacion_enviada",
+            }
+
+            if etapa in etapas_fiscales:
+                respuesta_dato, etapa_dato = _respuesta_siguiente_dato_comercial(
+                    cliente,
+                    etapa_objetivo="proforma",
+                )
+                respuesta_rut = f"{confirmacion_rut} {respuesta_dato}".strip()
+                etapa_rut = etapa_dato
+                ctx_rut = {"opciones_actuales": []}
+            else:
+                respuesta_rut = confirmacion_rut
+                etapa_rut = etapa or "inicio"
+                ctx_rut = dict(necesidad_ctx or {})
+                ctx_rut["opciones_actuales"] = []
+                ctx_rut["rut_extraido"] = {
+                    "nit": cliente.get("nit"),
+                    "empresa": cliente.get("empresa"),
+                }
+
+            logger.info(
+                "RUT PDF leído: session=%s nit=%s empresa=%s etapa=%s→%s",
+                session_id,
+                cliente.get("nit"),
+                cliente.get("empresa"),
+                etapa,
+                etapa_rut,
+            )
+
+            return await _guardar_y_responder_turno(
+                session_id=session_id,
+                phone_id=phone_id,
+                historial=historial,
+                mensaje_usuario=mensaje or f"[Adjunto RUT: {archivo_nombre}]",
+                respuesta=respuesta_rut,
+                etapa=etapa_rut,
+                cliente=cliente,
+                productos_acumulados=productos_acumulados,
+                necesidad_ctx=ctx_rut,
+                archivo_activo={
+                    "nombre": archivo_nombre,
+                    "tipo": "rut",
+                    "ts": datetime.utcnow().isoformat(),
+                },
+                items_resultado=[{
+                    "estado": "rut_leido",
+                    "nit": cliente.get("nit"),
+                    "empresa": cliente.get("empresa"),
+                    "texto_original": archivo_nombre,
+                }],
+                cotizacion_recibida=cotizacion_recibida,
+                archivo_cotizacion=archivo_cotizacion,
+                proforma_recibida=True,
+                archivo_proforma=archivo_nombre,
+            )
 
         items = await procesar_archivo(archivo_bytes, archivo_nombre)
 
@@ -6679,17 +6809,15 @@ async def procesar_turno(
 
         if nombre_cliente:
             respuesta_segura = (
-                f"Perfecto, {nombre_cliente}. Registré tu solicitud "
-                "con los productos y cantidades indicados. "
-                "La cotización aún no ha sido emitida ni enviada. "
-                "Un asesor debe validarla y continuar el proceso."
+                f"{nombre_cliente}, registré tu solicitud con los "
+                "productos y cantidades indicados. La cotización "
+                "llegará lo más pronto posible."
             )
         else:
             respuesta_segura = (
-                "Perfecto. Registré tu solicitud con los productos "
-                "y cantidades indicados. La cotización aún no ha sido "
-                "emitida ni enviada. Un asesor debe validarla y "
-                "continuar el proceso."
+                "Registré tu solicitud con los productos y "
+                "cantidades indicados. La cotización llegará "
+                "lo más pronto posible."
             )
 
     if respuesta_segura:

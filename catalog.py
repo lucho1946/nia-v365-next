@@ -107,6 +107,38 @@ def _tokens(text: str) -> list[str]:
     ]
 
 
+def _variantes_token_busqueda(token: str) -> list[str]:
+    """
+    Variantes morfológicas mínimas ES para catálogo.
+
+    Ej.: analizadores ↔ analizador
+    Evita perder categoría cuando el cliente escribe plural y el
+    producto está en singular (o al revés).
+    """
+    t = _normalize_text(token)
+    if not t or len(t) < 3:
+        return []
+
+    variantes = [t]
+
+    if len(t) > 5 and t.endswith("es"):
+        variantes.append(t[:-2])
+    elif len(t) > 4 and t.endswith("s"):
+        variantes.append(t[:-1])
+    else:
+        variantes.append(t + "es")
+        variantes.append(t + "s")
+
+    # Dedup preservando orden.
+    vistos = set()
+    out = []
+    for v in variantes:
+        if v and v not in vistos and len(v) >= 3:
+            vistos.add(v)
+            out.append(v)
+    return out
+
+
 def _first_value(prod: dict, keys: list[str], default: Any = "") -> Any:
     """
     Retorna el primer valor no vacío de una lista de campos posibles.
@@ -516,23 +548,30 @@ def _build_mongo_text_query(query: str) -> dict:
     # Limitamos tokens para evitar consultas demasiado pesadas.
     tokens = tokens[:6]
 
+    campos_texto = [
+        "texto_busqueda",
+        "DESCRIPCION_CORTA_PRE",
+        "DESCRIPCION_LARGA_PRE",
+        "NIVEL_0",
+        "NIVEL_1",
+        "NIVEL_2",
+        "NIVEL_3",
+        "NIVEL_4",
+        "REFERENCIA",
+        "MARCA_LET",
+    ]
+
     and_filters = []
 
     for token in tokens:
-        safe = re.escape(token)
-        and_filters.append(
-            {
-                "$or": [
-                    {"texto_busqueda": {"$regex": safe, "$options": "i"}},
-                    {"DESCRIPCION_CORTA_PRE": {"$regex": safe, "$options": "i"}},
-                    {"DESCRIPCION_LARGA_PRE": {"$regex": safe, "$options": "i"}},
-                    {"NIVEL_4": {"$regex": safe, "$options": "i"}},
-                    {"NIVEL_3": {"$regex": safe, "$options": "i"}},
-                    {"REFERENCIA": {"$regex": safe, "$options": "i"}},
-                    {"MARCA_LET": {"$regex": safe, "$options": "i"}},
-                ]
-            }
-        )
+        variantes = _variantes_token_busqueda(token) or [token]
+        or_filters = []
+        for variante in variantes:
+            safe = re.escape(variante)
+            for campo in campos_texto:
+                or_filters.append({campo: {"$regex": safe, "$options": "i"}})
+
+        and_filters.append({"$or": or_filters})
 
     base_filter = {
         "$and": and_filters
@@ -1305,6 +1344,9 @@ def _score_producto(
         [
             _clean_text(prod.get("nombre")),
             _clean_text(prod.get("categoria")),
+            _clean_text(prod.get("nivel_0")),
+            _clean_text(prod.get("nivel_1")),
+            _clean_text(prod.get("nivel_2")),
             _clean_text(prod.get("nivel_4")),
             _clean_text(prod.get("nivel_3")),
         ]
@@ -1312,6 +1354,16 @@ def _score_producto(
 
     coverage_total = _token_coverage(query_tokens, texto_total)
     coverage_nombre = _token_coverage(query_tokens, nombre_categoria)
+    coverage_nivel = _token_coverage(
+        query_tokens,
+        " ".join(
+            [
+                _clean_text(prod.get("nivel_0")),
+                _clean_text(prod.get("nivel_1")),
+                _clean_text(prod.get("nivel_2")),
+            ]
+        ),
+    )
 
     sim_nombre = _sim(query, prod.get("nombre", ""))
     sim_desc = _sim(query, prod.get("descripcion_corta", ""))
@@ -1323,12 +1375,18 @@ def _score_producto(
         score_nia_norm = 0.0
 
     score_textual = (
-        coverage_total * 0.45
-        + coverage_nombre * 0.25
-        + sim_nombre * 0.15
-        + sim_desc * 0.10
+        coverage_total * 0.40
+        + coverage_nombre * 0.22
+        + coverage_nivel * 0.13
+        + sim_nombre * 0.12
+        + sim_desc * 0.08
         + score_nia_norm * 0.05
     )
+
+    # Bonus fuerte: la categoría jerárquica coincide completa con la consulta.
+    # Ej.: query "Analizadores De Espectro" ↔ NIVEL_1 "analizadores-de-espectro".
+    if coverage_nivel >= 0.99 and len(query_tokens) >= 2:
+        score_textual = max(score_textual, 0.92)
 
     score_campos = 0.0
 
