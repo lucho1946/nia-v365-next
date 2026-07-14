@@ -2552,6 +2552,44 @@ def _nombre_cliente_prefix(cliente: Optional[dict]) -> str:
     return ""
 
 
+def _titulo_producto_solicitado(texto: str) -> str:
+    """
+    Limpia saludo/verbos y deja el nombre del producto para el mensaje corto.
+    Ej.: 'hola necesito: Calentadores de gabinetes' -> 'Calentadores de Gabinetes'
+    """
+    t = str(texto or "").strip()
+    t = re.sub(
+        r"^(hola|buenas?\s+(tardes?|días|noches)|buenos\s+días|buen\s+día)"
+        r"[\s,.!:;-]*",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(
+        r"^(necesito|busco|quiero|requiero)\s*:?\s*",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    )
+    t = re.sub(r"\s+", " ", t).strip(" .:;-")
+    if not t:
+        return "ese producto"
+
+    menores = {"de", "del", "la", "el", "los", "las", "y", "o", "para", "en", "con"}
+    partes = []
+    for i, palabra in enumerate(t.split()):
+        baja = palabra.lower()
+        if i > 0 and baja in menores:
+            partes.append(baja)
+        else:
+            partes.append(palabra[:1].upper() + palabra[1:].lower() if palabra else palabra)
+    return " ".join(partes)
+
+
+def _mensaje_pedir_caracteristicas(texto_producto: str) -> str:
+    return f"Para {_titulo_producto_solicitado(texto_producto)}. Necesito más características."
+
+
 def _respuesta_pregunta_unica(
     cliente: dict,
     pregunta: str,
@@ -3071,11 +3109,14 @@ async def _continuar_descubrimiento_corta_larga(
                 ambigua, grupo, preguntas_dl = hay_familia_ambigua_por_dl(filtrados)
                 if ambigua and preguntas_dl:
                     pregunta0 = _pregunta_como_dict(preguntas_dl[0])
-                    prefix = _nombre_cliente_prefix(cliente)
+                    texto_prod = (
+                        ctx_actualizado.get("texto_original")
+                        or ctx_actualizado.get("query_evaluada")
+                        or ""
+                    )
                     return (
                         _marcar_respuesta_segura(
-                            f"{prefix}quedan varias alternativas. "
-                            f"{_texto_pregunta(pregunta0)}"
+                            _mensaje_pedir_caracteristicas(texto_prod)
                         ),
                         "descubrimiento",
                         {
@@ -4236,13 +4277,14 @@ def construir_respuesta_desde_resultado(
                 )
         pregunta0 = _pregunta_como_dict(preguntas[0])
         opciones = _opciones_pregunta(pregunta0)
-        prefix = _nombre_cliente_prefix(cliente)
-        texto = (
-            f"{prefix}encontré varias alternativas de ese tipo. "
-            f"Para elegir la correcta: {_texto_pregunta(pregunta0)}"
+        texto_prod = (
+            res.get("texto_original")
+            or necesidad_ctx_base.get("texto_original")
+            or necesidad_ctx_base.get("query_evaluada")
+            or ""
         )
         return (
-            _marcar_respuesta_segura(texto),
+            _marcar_respuesta_segura(_mensaje_pedir_caracteristicas(texto_prod)),
             "descubrimiento",
             {
                 **necesidad_ctx_base,
@@ -7215,7 +7257,12 @@ async def procesar_turno(
             nueva_etapa = "descubrimiento"
 
     # Prefijo de saludo cuando el mensaje venía con saludo + solicitud.
-    if greeting_prefix and respuesta:
+    # En familia DL el mensaje ya es corto ("Para X. Necesito más características.").
+    if (
+        greeting_prefix
+        and respuesta
+        and (necesidad_ctx or {}).get("flujo_descubrimiento") != "familia_dl"
+    ):
         resto = respuesta.strip()
         if resto:
             resto = resto[0].upper() + resto[1:]
