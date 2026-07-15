@@ -4639,9 +4639,6 @@ def _parece_nombre_simple(texto: str) -> Optional[str]:
     if t in bloqueados:
         return None
 
-    if _parece_solicitud_de_producto(limpio):
-        return None
-
     partes = limpio.split()
 
     if not (1 <= len(partes) <= 4):
@@ -4650,6 +4647,15 @@ def _parece_nombre_simple(texto: str) -> Optional[str]:
     patron_nombre = re.compile(r"^[A-Za-zÁÉÍÓÚáéíóúÑñüÜ'-]{2,}$")
 
     if not all(patron_nombre.match(p) for p in partes):
+        return None
+
+    # Verbos de pedido de producto: no son un nombre de persona.
+    # No usar _parece_solicitud_de_producto aquí: dos tokens ("Andres Valencia")
+    # se confunden con familia de producto y rompen el cierre comercial.
+    if re.search(
+        r"\b(necesito|busco|quiero|requiero|cotizar|agrega|agregar)\b",
+        t,
+    ):
         return None
 
     return " ".join(p.capitalize() for p in partes)
@@ -4967,13 +4973,35 @@ def _es_nueva_solicitud_durante_cierre(mensaje: str) -> bool:
     - también necesito una válvula
     - agrega otro sensor
     - necesito otro equipo
+
+    No trata un nombre de persona (ej. "Andres Valencia") como nueva solicitud.
     """
     t = _normalizar_intencion(mensaje)
 
-    if any(p in t for p in {"tambien necesito", "tambien quiero", "agrega", "agregar", "otro producto", "otra referencia"}):
+    if any(
+        p in t
+        for p in {
+            "tambien necesito",
+            "tambien quiero",
+            "agrega",
+            "agregar",
+            "otro producto",
+            "otra referencia",
+            "necesito otro",
+            "quiero otro",
+            "busco otro",
+        }
+    ):
         return True
 
-    return _parece_solicitud_de_producto(mensaje)
+    # Solo escapes con verbo de intención + ancla de producto, no 2 tokens sueltos.
+    if re.search(r"\b(necesito|busco|quiero|requiero)\b", t) and (
+        _extraer_keyword_instrumento(mensaje)
+        or detectar_categoria(mensaje) != "default"
+    ):
+        return True
+
+    return False
 
 # ─────────────────────────────────────────────────────────────
 # Controlador determinístico de estado comercial
