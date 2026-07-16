@@ -23,7 +23,10 @@ import logging
 import logging.handlers
 import os
 import re
+import tempfile
+import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException
@@ -208,6 +211,11 @@ class ChatRequest(BaseModel):
     session_id: str
     mensaje: str
     phone_id: Optional[str] = None
+    # Compatibilidad con front antiguo que sube antes a /upload-archivo.
+    archivo_nombre: Optional[str] = None
+    archivo_tipo: Optional[str] = None
+    archivo_ruta: Optional[str] = None
+    archivo_mimetype: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -216,6 +224,36 @@ class ChatResponse(BaseModel):
     opciones: Optional[list] = None
     items_resultado: Optional[list] = None
     cliente: Optional[dict] = None
+
+
+# Adjuntos temporales del front viejo (/upload-archivo → /nia/chat).
+UPLOAD_TMP_DIR = Path(tempfile.gettempdir()) / "nia_uploads"
+UPLOAD_TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _guardar_upload_temporal(contenido: bytes, nombre: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(nombre or "archivo"))[:80]
+    token = f"{uuid.uuid4().hex}_{safe}"
+    path = UPLOAD_TMP_DIR / token
+    path.write_bytes(contenido)
+    return str(path)
+
+
+def _leer_upload_temporal(ruta: Optional[str]) -> Optional[bytes]:
+    if not ruta:
+        return None
+    try:
+        path = Path(ruta)
+        # Solo permitir archivos dentro del directorio temporal NIA.
+        if path.resolve().parent != UPLOAD_TMP_DIR.resolve():
+            logger.warning("Ruta de adjunto fuera de temp NIA: %s", ruta)
+            return None
+        if not path.is_file():
+            return None
+        return path.read_bytes()
+    except Exception:
+        logger.exception("No se pudo leer adjunto temporal: %s", ruta)
+        return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -4669,6 +4707,8 @@ def _parece_empresa_simple(texto: str) -> Optional[str]:
     - ViaIndustrial SAS
     - Equipos Industriales Fenix S.A.S
     - Industrias ABC
+    - a nombre de David Valencia
+    - David Valencia
     """
     if not texto:
         return None
@@ -4681,7 +4721,25 @@ def _parece_empresa_simple(texto: str) -> Optional[str]:
     if _es_confirmacion_afirmativa(limpio) or _es_confirmacion_negativa(limpio):
         return None
 
-    if _parece_solicitud_de_producto(limpio):
+    # Quita prefijos naturales de la proforma.
+    limpio = re.sub(
+        r"^(?:a\s+nombre\s+de|razon\s+social(?:\s+es)?|razón\s+social(?:\s+es)?|"
+        r"empresa(?:\s+es)?|la\s+empresa(?:\s+es)?)\s*[:=-]?\s*",
+        "",
+        limpio,
+        flags=re.IGNORECASE,
+    ).strip(" ,.;:-")
+
+    if not limpio:
+        return None
+
+    t = _normalizar_intencion(limpio)
+
+    # Solo rechazar pedidos explícitos de producto, no nombres multi-palabra.
+    if re.search(
+        r"\b(necesito|busco|quiero|requiero|cotizar|agrega|agregar)\b",
+        t,
+    ):
         return None
 
     if len(limpio) < 3 or len(limpio) > 80:
@@ -4690,7 +4748,9 @@ def _parece_empresa_simple(texto: str) -> Optional[str]:
     if not re.search(r"[A-Za-zÁÉÍÓÚáéíóúÑñ]", limpio):
         return None
 
-    return limpio
+    # Si parece nombre de persona, capitaliza; si no, conserva el texto.
+    nombre = _parece_nombre_simple(limpio)
+    return nombre or limpio
 
 def _extraer_datos_contacto_desde_mensaje(mensaje: str) -> dict:
 
@@ -7359,11 +7419,50 @@ async def procesar_turno(
 @app.post("/nia/chat", response_model=ChatResponse)
 @limiter.limit("30/minute")
 async def nia_chat_texto(request: Request, req: ChatRequest):
+    archivo_bytes = _leer_upload_temporal(req.archivo_ruta)
+    archivo_nombre = req.archivo_nombre
+    if archivo_bytes and not archivo_nombre and req.archivo_ruta:
+        archivo_nombre = Path(req.archivo_ruta).name
+
     return ChatResponse(**await procesar_turno(
         session_id=req.session_id,
         mensaje=req.mensaje,
         phone_id=req.phone_id,
+        archivo_bytes=archivo_bytes,
+        archivo_nombre=archivo_nombre,
     ))
+
+
+@app.post("/upload-archivo")
+@limiter.limit("10/minute")
+async def upload_archivo_legacy(
+    request: Request,
+    archivo: UploadFile = File(...),
+):
+    """
+    Compatibilidad con el front público antiguo (pre /nia/chat/archivo).
+    Guarda el archivo en temp y devuelve metadatos para el siguiente /nia/chat.
+    """
+    contenido = await archivo.read()
+    nombre = archivo.filename or "archivo"
+    ruta = _guardar_upload_temporal(contenido, nombre)
+    mime = archivo.content_type or ""
+    if mime.startswith("image/"):
+        tipo = "imagen"
+    elif mime == "application/pdf" or nombre.lower().endswith(".pdf"):
+        tipo = "pdf"
+    else:
+        tipo = "documento"
+
+    return {
+        "archivo_nombre": nombre,
+        "archivo_tipo": tipo,
+        "archivo_ruta": ruta,
+        "archivo_mimetype": mime,
+        "archivo_tamano": len(contenido),
+        "nombre_original": nombre,
+        "tipo_entrada": tipo,
+    }
 
 
 @app.post("/nia/chat/archivo", response_model=ChatResponse)
